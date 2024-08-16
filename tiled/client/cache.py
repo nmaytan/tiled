@@ -131,3 +131,28 @@ class Cache(BaseStorage):
                     )
                     self._create_tables()
             self._setup_completed = True
+
+    def _create_tables(self) -> None:
+        with closing(self._connection.cursor()) as cursor:
+            cursor.execute(
+                """CREATE TABLE response (
+cache_key TEXT PRIMARY KEY,
+status_code INTEGER,
+headers JSON,
+body BLOB,
+is_stream INTEGER,
+encoding TEXT,
+size INTEGER,
+request JSON,
+time_created REAL,
+time_last_accessed REAL
+)"""
+            )
+            cursor.execute(
+                "CREATE TABLE tiled_http_response_cache_version (version INTEGER)"
+            )
+            cursor.execute(
+                "INSERT INTO tiled_http_response_cache_version (version) VALUES (?)",
+                (CACHE_DATABASE_SCHEMA_VERSION,),
+            )
+            self._connection.commit()

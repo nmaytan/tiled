@@ -77,10 +77,13 @@ class Cache(BaseStorage):
 
         if filepath is None:
             # Resolve this here, not at module scope, because the test suite
-            # injects TILED_CACHE_DIR env var to use a temporary directory
+            # injects TILED_CACHE_DIR env var to use a temporary directory.
             TILED_CACHE_DIR = Path(
                 os.getenv("TILED_CACHE_DIR", appdirs.user_cache_dir("tiled"))
             )
+            # TODO Consider defaulting to a temporary database, with a warning,
+            # if TILED_CACHE_DIR points to a networked filesystem. Unless perhaps
+            # flock() support can be checked (nfs version, or lock manager, etc).
             filepath = TILED_CACHE_DIR / "http_response_cache.db"
         if capacity <= max_item_size:
             raise ValueError("Capacity must be greater than max_item_size")

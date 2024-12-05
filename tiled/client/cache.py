@@ -34,13 +34,14 @@ def with_safe_threading(fn):
     @wraps(fn)
     def wrapper(obj, *args, **kwargs):
         sqlite_is_safe = sqlite3.threadsafety == ThreadingMode.SERIALIZED
+        lock_is_mine = False
 
         if not (PY311 and sqlite_is_safe):
-            obj._lock.acquire()
+            lock_is_mine = obj._lock.acquire()
         try:
             result = fn(obj, *args, **kwargs)
         finally:
-            if obj._lock.locked():
+            if lock_is_mine and obj._lock.locked():
                 obj._lock.release()
         return result
 

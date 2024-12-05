@@ -156,3 +156,10 @@ time_last_accessed REAL
                 (CACHE_DATABASE_SCHEMA_VERSION,),
             )
             self._connection.commit()
+
+    def __repr__(self):
+        module = type(self).__module__
+        qualname = type(self).__qualname__
+        memaddress = hex(id(self))
+        dbfile = str(self.filepath)
+        return f"<{module}.{qualname} object at {memaddress} using database {dbfile!r}>"

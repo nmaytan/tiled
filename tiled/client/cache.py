@@ -72,7 +72,7 @@ class Cache(BaseStorage):
         readonly=False,
     ) -> None:
         super().__init__(serializer, ttl)
-        self._connection = tp.Optional[sqlite3.Connection] - connection or None
+        self._connection: tp.Optional[sqlite3.Connection] = connection or None
         self._setup_completed: bool = False
         self._lock = SerializableLock()
 
@@ -164,3 +164,23 @@ time_last_accessed REAL
         memaddress = hex(id(self))
         dbfile = str(self.filepath)
         return f"<{module}.{qualname} object at {memaddress} using database {dbfile!r}>"
+
+    def __getstate__(self):
+        return (
+            self._setup_completed,
+            self._lock,
+            self._filepath,
+            self._capacity,
+            self._max_item_size,
+            self._readonly,
+        )
+
+    def __setstate__(self, state):
+        (setup_completed, lock, filepath, capacity, max_item_size, readonly) = state
+        self._lock = lock
+        self._filepath = filepath
+        self._capacity = capacity
+        self._max_item_size = max_item_size
+        self._readonly = readonly
+        if setup_completed:
+            self._setup()

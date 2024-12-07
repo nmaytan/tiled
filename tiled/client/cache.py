@@ -1,5 +1,6 @@
 import enum
 import httpcore
+import json
 import os
 import platformdirs
 import sqlite3
@@ -10,6 +11,7 @@ from datetime import datetime
 from hishel import BaseStorage, BaseSerializer
 from hishel._sync._storages import StorageResponse, RemoveTypes
 from hishel._serializers import Metadata
+from httpcore import Request, Response
 from pathlib import Path
 
 from .utils import SerializableLock
@@ -94,7 +96,6 @@ class Cache(BaseStorage):
         self.max_item_size = max_item_size
         self._readonly = readonly
 
-    @with_safe_threading
     def _setup(self) -> None:
         if not self._setup_completed:
             if not self._connection:
@@ -134,6 +135,7 @@ class Cache(BaseStorage):
                     self._create_tables()
             self._setup_completed = True
 
+    @with_safe_threading
     def _create_tables(self) -> None:
         with closing(self._connection.cursor()) as cursor:
             cursor.execute(
@@ -146,6 +148,7 @@ is_stream INTEGER,
 encoding TEXT,
 size INTEGER,
 request JSON,
+number_of_uses INTEGER,
 time_created REAL,
 time_last_accessed REAL
 )"""
@@ -188,12 +191,12 @@ time_last_accessed REAL
 
     @property
     def filepath(self):
-        "Filepath of the SQLite database used for storing cache data"
+        """Filepath of the SQLite database used for storing cache data"""
         return self._filepath
 
     @property
     def capacity(self):
-        "Max capacity of the cache, in bytes. Includes the response AND request bodies."
+        """Max capacity of the cache, in bytes. Includes the response AND request bodies."""
         return self._capacity
 
     @capacity.setter
@@ -222,8 +225,88 @@ time_last_accessed REAL
 
     @property
     def readonly(self):
-        "If readonly, cache can be read but not updated."
+        """If readonly, cache can be read but not updated."""
         return self._readonly
+
+    @with_safe_threading
+    def _update_metadata(
+        self,
+        key: str,
+        response: Response,
+        request: Request,
+        metadata: Metadata,
+        content: tp.Optional[bytes] = None,
+    ) -> None:
+        """
+        Updates the metadata of the stored response.
+
+        :param key: Hashed value of concatenated HTTP method and URI
+        :type key: str
+        :param response: An HTTP response
+        :type response: httpcore.Response
+        :param request: An HTTP request
+        :type request: httpcore.Request
+        :param metadata: Additional information about the stored response
+        :type metadata: Metadata
+        :param content: Provide if the response does not yet have content, defaults to None
+        :type content: tp.Optional[bytes], optional
+
+        This method was heavily inspired from Hishel's own implementation.
+        """
+        if self._connection is None:
+            raise RuntimeError("Cache is not connected")
+        with closing(self._connection.cursor()) as cursor:
+            # make this execute match our schema
+            cursor.execute(
+                "SELECT headers, number_of_uses, time_last_accessed FROM responses WHERE cache_key = ?",
+                [key],
+            )
+            row = cursor.fetchone()
+            if row is not None:
+                serialized_headers = json.dumps(
+                    [
+                        (
+                            header_key.decode(encoding="ascii"),
+                            header_value.decode("ascii"),
+                        )
+                        for header_key, header_value in response.headers
+                    ]
+                )
+                cursor.execute(
+                    "UPDATE responses SET headers = ?, number_of_uses = ?, time_last_accessed = ? WHERE cache_key = ?",
+                    [
+                        serialized_headers,
+                        metadata["number_of_uses"],
+                        datetime.now().timestamp(),
+                        key,
+                    ],
+                )
+                self._connection.commit()
+                return
+        return self.store(key, response, request, metadata, content)
+
+    def update_metadata(
+        self,
+        key: str,
+        response: Response,
+        request: Request,
+        metadata: Metadata,
+        content: tp.Optional[bytes] = None,
+    ) -> None:
+        if self._connection is None:
+            self._setup()
+        return self._update_metadata(key, response, request, metadata, content)
+
+    @with_safe_threading
+    def clear(self):
+        """Drop all entries from HTTP response cache."""
+        if self._connection is None:
+            raise RuntimeError("Cache is not connected")
+        if self.readonly:
+            raise RuntimeError("Cannot clear read-only cache")
+        with closing(self._connection.cursosr()) as cursor:
+            cursor.execute("DELETE FROM responses")
+            self._connection.commit()
 
     def size(self):
         """
@@ -231,17 +314,21 @@ time_last_accessed REAL
         Includes the size of the corresponding request bodies.
         Does not include the size of headers and other auxiliary info.
         """
+        if self._connection is None:
+            raise RuntimeError("Cache is not connected")
         with closing(self._connection.cursor()) as cursor:
             (total_size,) = cursor.execute("SELECT SUM(size) FROM responses").fetchone()
         return total_size or 0  # if empty, total_size is None
 
     def count(self):
-        "Number of responses cached."
+        """Number of responses cached."""
+        if self._connection is None:
+            raise RuntimeError("Cache is not connected")
         with closing(self._connection.cursor()) as cursor:
             (count,) = cursor.execute("SELECT COUNT(*) FROM responses").fetchone()
         return count or 0  # if empty, count is None
 
     def close(self) -> None:
-        "Close the cache."
+        """Close the cache."""
         if self._connection is not None:
             self._connection.close()

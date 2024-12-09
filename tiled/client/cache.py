@@ -9,7 +9,7 @@ import sys
 
 from datetime import datetime
 from hishel import BaseStorage, BaseSerializer
-from hishel._sync._storages import StorageResponse, RemoveTypes
+from hishel._sync._storages import StoredResponse, RemoveTypes
 from hishel._serializers import Metadata
 from httpcore import Request, Response
 from pathlib import Path
@@ -74,6 +74,7 @@ class Cache(BaseStorage):
         max_item_size=500_000,
         readonly=False,
     ) -> None:
+        # ttl is in seconds, capacity and max_item_size are in bytes
         super().__init__(serializer, ttl)
         self._connection: tp.Optional[sqlite3.Connection] = connection or None
         self._setup_completed: bool = False
@@ -133,6 +134,7 @@ class Cache(BaseStorage):
                         filepath, check_same_thread=False
                     )
                     self._create_tables()
+            cursor.close()
             self._setup_completed = True
 
     @with_safe_threading
@@ -204,7 +206,7 @@ time_last_accessed REAL
         if capacity < 1:
             raise ValueError("Cache capacity cannot be less than 1 byte")
         elif self.max_item_size and capacity < self.max_item_size:
-            raise ValueError("Cache capacity cannot be less than allowed item size")
+            raise ValueError("Cache capacity cannot be less than allowed entry size")
         self._capacity = capacity
 
     @property
@@ -218,15 +220,38 @@ time_last_accessed REAL
     @max_item_size.setter
     def max_item_size(self, max_item_size):
         if max_item_size < 1:
-            raise ValueError("Cached items cannot be less than 1 byte")
+            raise ValueError("Cache entry size cannot be less than 1 byte")
         elif max_item_size > self.capacity:
-            raise ValueError("Cached items cannot be greater than cache capacity")
+            raise ValueError("Cache entry size cannot be greater than cache capacity")
         self._max_item_size = max_item_size
 
     @property
     def readonly(self):
         """If readonly, cache can be read but not updated."""
         return self._readonly
+
+    @with_safe_threading
+    def _remove(self, key: RemoveTypes) -> None:
+        """
+        Removes the response from the cache.
+
+        :param key: Hashed value of concatenated HTTP method and URI or an HTTP response
+        :type key: Union[str, Response]
+        """
+        if self._connection is None or not self._setup_completed():
+            raise RuntimeError("Cache is not connected")
+        if self.readonly:
+            raise RuntimeError("Cannot delete entries from read-only cache")
+        if isinstance(key, Response):
+            key = tp.cast(str, key.extensions["cache_metadata"]["cache_key"])
+        with closing(self._connection.cursor()) as cursor:
+            cursor.execute("DELETE FROM responses WHERE cache_key = ?", [key])
+            self._connection.commit()
+
+    def remove(self, key: RemoveTypes) -> None:
+        if not self._setup_completed:
+            self._setup()
+        return self._remove(key)
 
     @with_safe_threading
     def _update_metadata(
@@ -253,8 +278,10 @@ time_last_accessed REAL
 
         This method was heavily inspired from Hishel's own implementation.
         """
-        if self._connection is None:
+        if self._connection is None or not self._setup_completed:
             raise RuntimeError("Cache is not connected")
+        if self.readonly:
+            raise RuntimeError("Cannot update entries in read-only cache")
         with closing(self._connection.cursor()) as cursor:
             # make this execute match our schema
             cursor.execute(
@@ -293,14 +320,30 @@ time_last_accessed REAL
         metadata: Metadata,
         content: tp.Optional[bytes] = None,
     ) -> None:
-        if self._connection is None:
+        if self._connection is None or not self._setup_completed:
             self._setup()
         return self._update_metadata(key, response, request, metadata, content)
 
     @with_safe_threading
+    def _remove_expired_caches(self) -> None:
+        """Remove all expired entries from the cache."""
+        if self._connection is None or not self._setup_completed:
+            raise RuntimeError("Cache is not connected")
+        if self.readonly:
+            raise RuntimeError("Cannot remove entries from read-only cache")
+        if self._ttl is None:
+            return
+        with closing(self._connection.cursor()) as cursor:
+            cursor.execute(
+                "DELETE FROM responses WHERE time_created + ? < ?",
+                [self._ttl, datetime.now().timestamp()],
+            )
+            self._connection.commit()
+
+    @with_safe_threading
     def clear(self):
         """Drop all entries from HTTP response cache."""
-        if self._connection is None:
+        if self._connection is None or not self._setup_completed:
             raise RuntimeError("Cache is not connected")
         if self.readonly:
             raise RuntimeError("Cannot clear read-only cache")
@@ -314,7 +357,7 @@ time_last_accessed REAL
         Includes the size of the corresponding request bodies.
         Does not include the size of headers and other auxiliary info.
         """
-        if self._connection is None:
+        if self._connection is None or not self._setup_completed:
             raise RuntimeError("Cache is not connected")
         with closing(self._connection.cursor()) as cursor:
             (total_size,) = cursor.execute("SELECT SUM(size) FROM responses").fetchone()
@@ -322,7 +365,7 @@ time_last_accessed REAL
 
     def count(self):
         """Number of responses cached."""
-        if self._connection is None:
+        if self._connection is None or not self._setup_completed:
             raise RuntimeError("Cache is not connected")
         with closing(self._connection.cursor()) as cursor:
             (count,) = cursor.execute("SELECT COUNT(*) FROM responses").fetchone()

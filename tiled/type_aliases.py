@@ -32,19 +32,17 @@ JSON = Mapping[str, JSON_ITEM]
 Scopes = Set[str]
 Query = Any  # for now...
 Filters = List[Query]
+AccessTags = Set[str]
+Chunks = Tuple[Tuple[int, ...], ...]
+
+AppTask = Callable[[], Coroutine[None, None, Any]]
+"""Async function to be run as part of the app's lifecycle"""
 
 
 @dataclass(frozen=True)
 class AccessBlob:
     username: str | None = None
     tags: list[str] | None = None
-
-
-AccessTags = Set[str]
-Chunks = Tuple[Tuple[int, ...], ...]
-
-AppTask = Callable[[], Coroutine[None, None, Any]]
-"""Async function to be run as part of the app's lifecycle"""
 
 
 class TaskMap(TypedDict):

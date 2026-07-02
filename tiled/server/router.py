@@ -152,6 +152,26 @@ def _access_blob_to_payload(access_blob):
     return {}
 
 
+def _access_blob_from_payload(access_blob):
+    if access_blob is None:
+        return None
+    if "user" in access_blob:
+        return AccessBlob(username=access_blob["user"])
+    if "tags" in access_blob:
+        return AccessBlob(tags=access_blob["tags"])
+    return AccessBlob(tags=[])
+
+
+def _access_blob_to_payload(access_blob):
+    if access_blob is None:
+        return {}
+    if access_blob.username is not None:
+        return {"user": access_blob.username}
+    if access_blob.tags is not None:
+        return {"tags": access_blob.tags}
+    return {}
+
+
 def _patch_route_signature(
     query_registry: QueryRegistry,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:

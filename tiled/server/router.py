@@ -153,7 +153,7 @@ def _access_blob_to_payload(access_blob):
 
 
 def _access_blob_from_payload(access_blob):
-    if access_blob is None:
+    if access_blob == {}:
         return None
     if "user" in access_blob:
         return AccessBlob(username=access_blob["user"])

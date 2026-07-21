@@ -8,12 +8,14 @@ import typing as tp
 import sys
 
 from datetime import datetime
+from hashlib import sha256
 from hishel import BaseStorage, BaseSerializer
 from hishel._sync._storages import StoredResponse, RemoveTypes
 from hishel._serializers import Metadata
 from httpcore import Request, Response
 from pathlib import Path
 
+from .logger import logger
 from .utils import SerializableLock
 
 
@@ -21,6 +23,52 @@ CACHE_DATABASE_SCHEMA_VERSION = 2
 
 # This is currently only used for checking SQlite thread-safety
 PY311 = sys.version_info >= (3, 11)
+
+
+###
+import hishel
+import httpx
+
+controller = hishel.Controller(key_generator=create_cache_key)
+tiled_cache = TiledCache()
+transport = hishel.CacheTransport(transport=httpx.HTTPTransport(), storage=tiled_cache)
+###
+
+
+def create_cache_key(request: Request, body: bytes = b"") -> str:
+    """
+    Generate a Cache key. A Cache key contains the method, url, and request body.
+    :param request: An HTTP request
+    :type rquest: httpcore.Request
+    :param body: The body of the request. To be included for e.g. POST
+    :type body: tp.Optional[bytes]
+    """
+    method = request.method.decode()
+    url = request.url.decode()  # check that this is the full URL
+    body_hasher = sha256()
+    body_hasher.update(body)
+    body_hashed = body_hasher.hexdigest()
+    return f"{method}|{url}|{body_hashed}"
+
+
+def measure_entry_size(request, response, response_content=None, request_content=None):
+    # httpcore exception that is == httpx.ResponseNotRead()
+    # Trace out the way this works for a streaming response
+    # Also handle streaming request
+    if hasattr(response, "_content"):
+        size = len(response.content)
+    elif response_content is None:
+        raise Exception
+    else:
+        size = len(response_content)
+
+    if hasattr(request, "_content"):
+        size += len(request.content)
+    elif request_content is None:
+        raise Exception
+    else:
+        size += len(request_content)
+    return size
 
 
 def with_safe_threading(fn):
@@ -63,7 +111,7 @@ class ThreadingMode(enum.IntEnum):
     SERIALIZED = 3
 
 
-class Cache(BaseStorage):
+class TiledCache(BaseStorage):
     def __init__(
         self,
         serializer: tp.Optional[BaseSerializer] = None,
@@ -231,17 +279,129 @@ time_last_accessed REAL
         return self._readonly
 
     @with_safe_threading
+    def _store(
+        self,
+        key: str,
+        response: Response,
+        request: Request,
+        metadata: tp.Optional[Metadata] = None,
+        response_content: tp.Optional[bytes] = None,
+        request_content: tp.Optional[bytes] = None,
+    ) -> None:
+        """
+        Store an entry in the cache.
+
+        :param key: The key which identifies the entry in the cache
+        :type key: str
+        :param response: An HTTP response
+        :type response: httpcore.Response
+        :param request: An HTTP request
+        :type request: httpcore.Request
+        :param metadata: Additional information about the stored response
+        :type metadata: Metadata
+        :param response_content: Provide if the response does not yet have content, defaults to None
+        :type response_content: tp.Optional[bytes], optional
+        :param request_content: Provide if the request does not yet have content, defaults to None
+        :type request_content: tp.Optional[bytes], optional
+
+        """
+        if self._connection is None or not self._setup_completed():
+            raise RuntimeError("Cache is not connected")
+        if self.readonly:
+            raise RuntimeError("Cannot store new entries in read-only cache")
+        incoming_size = measure_entry_size(
+            request, response, response_content, request_content
+        )
+        if incoming_size > self.max_item_size:
+            logger.debug(
+                f"Cache declined entry which is too large: {incoming_size} > {self.max_item_size} (bytes)"
+            )
+            return
+        # Do we need to create a metadata object for our schema?
+        metadata = metadata or Metadata(
+            cache_key=key, created_at_time=datetime.now.timestamp(), number_of_uses=0
+        )
+        with closing(self._connection.cursor()) as cursor:
+            (total_size,) = cursor.execute("SELECT SUM(size) FROM responses").fetchone()
+            total_size = total_size or 0  # If empty, total_size is None
+            while (incoming_size + total_size) > self.capacity:
+                (cached_key, size) = cursor.execute(
+                    """SELECT cache_key, size FROM responses ORDER BY time_last_accessed ASC"""
+                ).fetchone()
+                cursor.execute(
+                    "DELETE FROM responses WHERE cache_key = ?", [cached_key]
+                )
+                total_size -= size
+            cursor.execute(
+                """INSERT OR REPLACE INTO responses(
+cache_key,
+status_code,
+headers,
+body,
+is_stream,
+encoding,
+size,
+request,
+number_of_uses,
+time_created,
+time_last_accessed
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [key, self._serializer.dumps(response, request, metadata, content)],
+                # handle streaming request?
+            )
+            self._connection.commit()
+
+    def store(
+        self,
+        key: str,
+        response: Response,
+        request: Request,
+        metadata: tp.Optional[Metadata] = None,
+        response_content: tp.Optional[bytes] = None,
+        request_content: tp.Optional[bytes] = None,
+    ) -> None:
+        if not self.setup_completed:
+            self._setup
+        self._store(key, response, request, metadata, response_content, request_content)
+        self._remove_expired_caches()
+
+    def retrieve(self, key: str) -> tp.Optional[StoredResponse]:
+        """
+        Retreive a response from the cache according to the provided key.
+
+        :param key: The key which identifies the entry in the cache
+        :type key: str
+        :return: An HTTP response and its HTTP request.
+        :rtype: tp.Optional[StoredResponse]
+        """
+        if not self._setup_completed():
+            self._setup()
+        self._removed_expired_caches()
+        with closing(self._connection.cursor()) as cursor:
+            cursor.execute(
+                """SELECT
+status_code, headers, body, is_stream, encoding, request, time_created
+FROM responses
+WHERE cache_key = ?""",
+                [key],
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+        return self._serializer.loads(row)
+
+    @with_safe_threading
     def _remove(self, key: RemoveTypes) -> None:
         """
         Removes the response from the cache.
 
-        :param key: Hashed value of concatenated HTTP method and URI or an HTTP response
+        :param key: The key which identifies the entry in the cache or an HTTP response
         :type key: Union[str, Response]
         """
         if self._connection is None or not self._setup_completed():
             raise RuntimeError("Cache is not connected")
         if self.readonly:
-            raise RuntimeError("Cannot delete entries from read-only cache")
+            raise RuntimeError("Cannot remove entries from read-only cache")
         if isinstance(key, Response):
             key = tp.cast(str, key.extensions["cache_metadata"]["cache_key"])
         with closing(self._connection.cursor()) as cursor:
@@ -260,12 +420,13 @@ time_last_accessed REAL
         response: Response,
         request: Request,
         metadata: Metadata,
-        content: tp.Optional[bytes] = None,
+        response_content: tp.Optional[bytes] = None,
+        request_content: tp.Optional[bytes] = None,
     ) -> None:
         """
         Updates the metadata of the stored response.
 
-        :param key: Hashed value of concatenated HTTP method and URI
+        :param key: The key which identifies the entry in the cache
         :type key: str
         :param response: An HTTP response
         :type response: httpcore.Response
@@ -273,8 +434,10 @@ time_last_accessed REAL
         :type request: httpcore.Request
         :param metadata: Additional information about the stored response
         :type metadata: Metadata
-        :param content: Provide if the response does not yet have content, defaults to None
-        :type content: tp.Optional[bytes], optional
+        :param response_content: Provide if the response does not yet have content, defaults to None
+        :type response_content: tp.Optional[bytes], optional
+        :param request_content: Provide if the request does not yet have content, defaults to None
+        :type request_content: tp.Optional[bytes], optional
 
         This method was heavily inspired from Hishel's own implementation.
         """
@@ -283,7 +446,6 @@ time_last_accessed REAL
         if self.readonly:
             raise RuntimeError("Cannot update entries in read-only cache")
         with closing(self._connection.cursor()) as cursor:
-            # make this execute match our schema
             cursor.execute(
                 "SELECT headers, number_of_uses, time_last_accessed FROM responses WHERE cache_key = ?",
                 [key],
@@ -310,7 +472,9 @@ time_last_accessed REAL
                 )
                 self._connection.commit()
                 return
-        return self.store(key, response, request, metadata, content)
+        return self.store(
+            key, response, request, metadata, response_content, request_content
+        )
 
     def update_metadata(
         self,
@@ -318,11 +482,14 @@ time_last_accessed REAL
         response: Response,
         request: Request,
         metadata: Metadata,
-        content: tp.Optional[bytes] = None,
+        response_content: tp.Optional[bytes] = None,
+        request_content: tp.Optional[bytes] = None,
     ) -> None:
         if self._connection is None or not self._setup_completed:
             self._setup()
-        return self._update_metadata(key, response, request, metadata, content)
+        return self._update_metadata(
+            key, response, request, metadata, response_content, request_content
+        )
 
     @with_safe_threading
     def _remove_expired_caches(self) -> None:

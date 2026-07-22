@@ -11,7 +11,7 @@ import pytest
 from tiled.adapters.array import ArrayAdapter
 from tiled.adapters.mapping import MapAdapter
 from tiled.client import Context, from_context, record_history
-from tiled.client.cache import Cache, CachedResponse, ThreadingMode, with_thread_lock
+from tiled.client.cache import ThreadingMode, TiledCache, with_thread_lock
 from tiled.server.app import build_app
 
 tree = MapAdapter(
@@ -26,20 +26,22 @@ tree = MapAdapter(
 @pytest.fixture
 def client():
     app = build_app(tree)
-    with Context.from_app(app, cache=Cache()) as context:
+    with Context.from_app(app, cache=TiledCache()) as context:
         yield from_context(context)
 
 
 def test_cache(client, tmpdir):
+    # assert False
     cache = client.context.cache
+
     before_count = cache.count()
     before_size = cache.size()
-
     # First time: not cached
     with record_history() as h:
         list(client.keys())
+        print(h.responses)
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     after_count = cache.count()
     after_size = cache.size()
@@ -50,7 +52,7 @@ def test_cache(client, tmpdir):
     with record_history() as h:
         list(client.keys())
     for response in h.responses:
-        assert isinstance(response, CachedResponse)
+        assert response.extensions.get("hishel_from_cache")
 
 
 def test_no_cache(client):
@@ -60,17 +62,18 @@ def test_no_cache(client):
     with record_history() as h:
         list(client.keys())
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     # Second time: cached
     with record_history() as h:
         list(client.keys())
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
 
 def test_lru_eviction(client):
     # First time: not cached
+    client.context.cache.max_item_size = 1000
     client.context.cache.capacity = 5000
     num_items = len(client)
     for i in range(num_items):
@@ -85,19 +88,19 @@ def test_lru_eviction(client):
     with record_history() as h:
         client.values()[i]
     for response in h.responses:
-        assert isinstance(response, CachedResponse)
+        assert response.extensions.get("hishel_from_cache")
 
     # Least recently accessed: has been evicted
     with record_history() as h:
         client.values()[0]
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     # Second time: cached
     with record_history() as h:
         client.metadata
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
 
 def test_item_too_large_to_store(client):
@@ -107,13 +110,13 @@ def test_item_too_large_to_store(client):
     with record_history() as h:
         list(client.keys())
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     # Second time: still not cached
     with record_history() as h:
         list(client.keys())
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
 
 def test_readonly_cache(client):
@@ -123,38 +126,38 @@ def test_readonly_cache(client):
     with record_history() as h:
         client.values()[0]
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     # Second time: cached
     with record_history() as h:
         client.values()[0]
     for response in h.responses:
-        assert isinstance(response, CachedResponse)
+        assert response.extensions.get("hishel_from_cache")
 
     orig_size = client.context.cache.size()
 
     # Now use the same file as readonly cache.
     filepath = client.context.cache.filepath
-    ro_cache = client.context.cache = Cache(filepath, readonly=True)
+    ro_cache = client.context.cache = TiledCache(filepath=filepath, readonly=True)
 
     # Still cached (from before)
     with record_history() as h:
         client.values()[0]
     for response in h.responses:
-        assert isinstance(response, CachedResponse)
+        assert response.extensions.get("hishel_from_cache")
 
     # Now look at something new...
     # First time: not cached
     with record_history() as h:
         client.values()[1]
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     # Second time: still not cached
     with record_history() as h:
         client.values()[1]
     for response in h.responses:
-        assert not isinstance(response, CachedResponse)
+        assert not response.extensions.get("hishel_from_cache")
 
     # And cache size has not changed
     assert ro_cache.size() == orig_size
@@ -162,7 +165,7 @@ def test_readonly_cache(client):
     # Implementation detail: database connection is read-only,
     # for defense in depth.
     with pytest.raises(sqlite3.OperationalError):
-        with closing(ro_cache._conn.cursor()) as cur:
+        with closing(ro_cache.connection.cursor()) as cur:
             cur.execute("DELETE FROM responses")
 
 
@@ -186,10 +189,10 @@ def test_not_thread_safe(client, monkeypatch):
             future.result(timeout=1)
 
 
-@pytest.mark.skipif(
-    sqlite3.threadsafety != ThreadingMode.SERIALIZED,
-    reason="sqlite not built with thread safe support",
-)
+# @pytest.mark.skipif(
+#     sqlite3.threadsafety != ThreadingMode.SERIALIZED,
+#     reason="sqlite not built with thread safe support",
+# )
 def test_thread_safety(client):
     cache = client.context.cache
     # Clear the cache in another thread

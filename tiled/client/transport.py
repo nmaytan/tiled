@@ -5,21 +5,21 @@ in accordance with its BSD-3 license
 import typing as tp
 
 import httpx
+from hishel import CacheOptions, SpecificationPolicy
+from hishel.httpx import SyncCacheTransport
 
-from .cache import Cache
-from .cache_control import ByteStreamWrapper, CacheControl
+from .cache import TiledCache
 from .logger import collect_request, collect_response, log_request, log_response, logger
 from .utils import TiledResponse
 
 
-class Transport(httpx.BaseTransport):
-    """Custom transport, implementing caching and custom compression encodings.
+class TiledTransport(httpx.BaseTransport):
+    """Custom transport, implementing caching.
 
     Args:
         transport (optional): an existing httpx transport, if no transport
             is given, defaults to an httpx.HTTPTransport with default args.
-        cache (optional): cache to use with this transport, defaults to
-            httpx_cache.DictCache
+        cache (optional): cache to use with this transport.
         cacheable_methods: methods that are allowed to be cached, defaults to ['GET']
         cacheable_status_codes: status codes that are allowed to be cached,
             defaults to: (200, 203, 300, 301, 308)
@@ -29,7 +29,7 @@ class Transport(httpx.BaseTransport):
         self,
         *,
         transport: tp.Optional[httpx.BaseTransport] = None,
-        cache: tp.Optional[Cache] = None,
+        cache: tp.Optional[TiledCache] = None,
         limits: tp.Optional[httpx.Limits] = None,
         cacheable_methods: tp.Tuple[str, ...] = ("GET",),
         cacheable_status_codes: tp.Tuple[int, ...] = (
@@ -40,19 +40,40 @@ class Transport(httpx.BaseTransport):
             httpx.codes.PERMANENT_REDIRECT,
         ),
         always_cache: bool = False,
+        shared: bool = True,
     ):
-        self.controller = CacheControl(
-            cacheable_methods=cacheable_methods,
-            cacheable_status_codes=cacheable_status_codes,
-            always_cache=always_cache,
-        )
+        self.cacheable_methods = cacheable_methods
         if transport is not None:
             self.transport = transport
         elif limits is not None:
             self.transport = httpx.HTTPTransport(limits=limits)
         else:
             self.transport = httpx.HTTPTransport()
-        self.cache = cache
+        self.shared = shared
+        self.cache = cache  # This sets the cache from the cache.setter below
+
+    @property
+    def cache(self):
+        return self._cache
+
+    @cache.setter
+    def cache(self, cache):
+        # This is in case the cache changes to prevent a stale transport by reapplying the wrapper
+        # so that SyncCacheTransport doesn't continue to point at the old storage
+        self._cache = cache
+        if cache is None:
+            self._active_transport = self.transport
+        else:
+            # wrapper so we can use the Hishel transport. Handles writing etc for us
+            self._active_transport = SyncCacheTransport(
+                policy=SpecificationPolicy(
+                    cache_options=CacheOptions(
+                        supported_methods=self.cacheable_methods, shared=self.shared
+                    )
+                ),
+                next_transport=self.transport,
+                storage=cache,
+            )
 
     def close(self) -> None:
         self.transport.close()
@@ -60,101 +81,29 @@ class Transport(httpx.BaseTransport):
             self.cache.close()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        # check if request is cacheable
-        if (self.cache is not None) and self.controller.is_request_cacheable(request):
-            if __debug__:
-                logger.debug("Checking cache for: %s", request)
-            cached_response = self.cache.get(request)
-            if cached_response is not None:
-                if self.controller.is_response_fresh(
-                    request=request, response=cached_response
-                ):
-                    if not self.controller.needs_revalidation(
-                        request=request, response=cached_response
-                    ):
-                        if __debug__:
-                            logger.debug("Using cached response for: %s", request)
-                            log_request(request)
-                            collect_request(request)
-                        return cached_response
-                    if __debug__:
-                        logger.debug("Revalidating cached response for: %s", request)
-                    request.headers["If-None-Match"] = cached_response.headers["ETag"]
-                else:
-                    if __debug__:
-                        logger.debug("Cached response is stale, deleting: %s", request)
-                    self.cache.delete(request)
-            else:
-                if __debug__:
-                    logger.debug(
-                        "No valid cached response found in cache for: %s", request
-                    )
-
         # Call original transport
         if __debug__:
             log_request(request)
             collect_request(request)
-        response = self.transport.handle_request(request)
+        response = self._active_transport.handle_request(request)
         response.__class__ = TiledResponse
         response.request = request
+        if self.cache is not None:
+            from_cache = False
+            from_cache = response.extensions.get("hishel_from_cache")
+            if from_cache:
+                logger.info("Cache hit")
+            else:
+                logger.info("Cache miss")
         if __debug__:
             # Log the actual server traffic, not the cached response.
             log_response(response)
             # But, below _collect_ the response with the content in it.
-
-        if self.cache is not None:
-            if response.status_code == httpx.codes.NOT_MODIFIED:
-                if __debug__:
-                    logger.debug(
-                        "Server validated as fresh cached entry for: %s", request
-                    )
-                    collect_response(cached_response)
-                return cached_response
-
-            if self.controller.is_response_cacheable(
-                request=request, response=response
-            ):
-                if self.cache.readonly:
-                    if __debug__:
-                        logger.debug("Cache is read-only; will not store")
-                elif not self.cache.write_safe():
-                    if __debug__:
-                        logger.debug(
-                            "Cannot write to cache from another thread; will not store"
-                        )
-                else:
-                    if hasattr(response, "_content"):
-                        is_stored = self.cache.set(request=request, response=response)
-                        if __debug__:
-                            if is_stored:
-                                logger.debug("Caching response for: %s", request)
-                            else:
-                                logger.debug(
-                                    "Declined to store large response for: %s", request
-                                )
-                    else:
-                        # Wrap the response with cache callback:
-                        def _callback(content: bytes) -> None:
-                            is_stored = self.cache.set(
-                                request=request, response=response, content=content
-                            )
-                            if __debug__:
-                                if is_stored:
-                                    logger.debug("Caching response for: %s", request)
-                                else:
-                                    logger.debug(
-                                        "Declined to store large response for: %s",
-                                        request,
-                                    )
-
-                        response.stream = ByteStreamWrapper(
-                            stream=response.stream, callback=_callback  # type: ignore
-                        )
-        if __debug__:
             collect_response(response)
         return response
 
 
+# TODO: this needs to be updated for the new client-side cache with Hishel
 # For when we implement an Async client
 #
 # class AsyncCacheControlTransport(httpx.AsyncBaseTransport):

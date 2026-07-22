@@ -21,7 +21,7 @@ from .._version import __version__ as tiled_version
 from ..utils import UNSET, DictView, parse_time_string
 from .auth import CannotRefreshAuthentication, TiledAuth, build_refresh_request
 from .decoders import SUPPORTED_DECODERS
-from .transport import Transport
+from .transport import TiledTransport
 from .utils import (
     DEFAULT_TIMEOUT_PARAMS,
     MSGPACK_MIME_TYPE,
@@ -239,7 +239,7 @@ class Context:
         )
         if app is None:
             client = httpx.Client(
-                transport=Transport(cache=cache, limits=limits),
+                transport=TiledTransport(cache=cache, limits=limits),
                 verify=verify,
                 timeout=timeout,
                 follow_redirects=True,
@@ -271,7 +271,7 @@ class Context:
             client.headers = headers
             # Do this in the setter to avoid being overwritten.
             client.follow_redirects = True
-            client._transport = Transport(transport=client._transport, cache=cache)
+            client._transport = TiledTransport(transport=client._transport, cache=cache)
             client.__enter__()
             # The TestClient is meant to be used only as a context manager,
             # where the context starts and stops and the wrapped ASGI app.
@@ -435,7 +435,7 @@ class Context:
         )
         self.http_client = httpx.Client(
             verify=verify,
-            transport=Transport(cache=cache, limits=limits),
+            transport=TiledTransport(cache=cache, limits=limits),
             cookies=cookies,
             timeout=timeout,
             headers=headers,

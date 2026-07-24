@@ -39,7 +39,6 @@ def test_cache(client, tmpdir):
     # First time: not cached
     with record_history() as h:
         list(client.keys())
-        print(h.responses)
     for response in h.responses:
         assert not response.extensions.get("hishel_from_cache")
 

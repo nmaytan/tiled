@@ -10,7 +10,7 @@ opt-out path.
 Tiled has two kinds of caching:
 
 1. **Client-side response cache.** The Tiled Python client implements a standard
-   web cache, similar in both concept and implementation to a web browser's cache.
+   web cache with Hishel, similar in both concept and implementation to a web browser's cache.
 2. **Server-side resource cache.** The resource cache is used to cache file
    handles and related system resources, to avoid rapidly opening, closing,
    and reopening the same files while handling a burst of requests.
@@ -26,13 +26,13 @@ from tiled.client import from_uri
 
 client = from_uri("...")
 client.context.cache.clear()  # clear cache
-c.context.cache.filepath  # locate SQLite file
+client.context.cache.filepath  # locate SQLite file
 
 # Customize the cache.
 
-from tiled.client.cache import Cache
+from tiled.client.cache import TiledCache
 
-cache = Cache(
+cache = TiledCache(
     capacity=500_000_000,  # bytes
     max_item_size=500_000,  # bytes
     filepath="path/to/my_cache.db",

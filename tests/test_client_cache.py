@@ -225,3 +225,16 @@ async def test_thread_lock():
         run_time = time.perf_counter() - t0
     # Check that the threads didn't run in parallel
     assert run_time >= (2.0 * timer.sleep_time), "Threads did not lock"
+
+
+def test_remove_expired_caches(client):
+    cache = client.context.cache
+    client.context.cache.default_ttl = 1
+    with record_history() as h:
+        client.values()[0]
+    for response in h.responses:
+        assert cache.count() > 0
+
+    time.sleep(1)
+    client.context.cache._remove_expired_caches()
+    assert cache.count() == 0

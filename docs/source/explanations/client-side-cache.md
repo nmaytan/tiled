@@ -48,7 +48,7 @@ In addition to the aforementioned constraints, `TiledCache` has other parameters
 
 The `filepath` parameter can be used to set the location that the cache will be stored at. It defaults to the user's Tiled directory / "http_response_cache.db".
 
-The `ttl` parameter, which stands for "Time to Live", determines how long an entry can be in the cache until it is deemed expired. Once a cached entry is considered expired, the next time that the automated cleanup runs that entry will be removed from the cache. The default value is `None`.
+The `default_ttl` parameter, which stands for "Time to Live", determines how long an entry can be in the cache until it is deemed expired. Once a cached entry is considered expired, the next time that the automated cleanup runs that entry will be removed from the cache. The default value is `None`.
 
 ## Streaming
 
@@ -99,7 +99,7 @@ The `size` and `count` functions are used to gather information for the cache in
 
 ### `_remove_expired_caches`
 
-Once the time that a cached entry has been present in the cache exceeds the set time to live (`ttl`) value the entry would be considered expired and can be removed with the `_remove_expired_caches` function. This uses soft deletion, which is elaborated on in the next section.
+Once the time that a cached entry has been present in the cache exceeds the set time to live (`default_ttl`) value the entry would be considered expired and can be removed with the `_remove_expired_caches` function. This uses soft deletion, which is elaborated on in the next section.
 
 ## Soft Deletion
 

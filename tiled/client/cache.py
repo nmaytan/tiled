@@ -69,13 +69,13 @@ class TiledCache(SyncSqliteStorage):
         self,
         *,
         connection: tp.Optional[sqlite3.Connection] = None,
-        ttl: tp.Optional[tp.Union[int, float]] = None,
+        default_ttl: tp.Optional[tp.Union[int, float]] = None,
         filepath=None,
         capacity=500_000_000,
         max_item_size=500_000,
         readonly=False,
     ) -> None:
-        # ttl is in seconds, capacity and max_item_size are in bytes
+        # default_ttl is in seconds, capacity and max_item_size are in bytes
 
         self._setup_completed: bool = False
 
@@ -96,8 +96,11 @@ class TiledCache(SyncSqliteStorage):
         self.max_item_size = max_item_size
         self._readonly = readonly
         self._owner_thread = threading.current_thread().ident
+        self.default_ttl = default_ttl
 
-        super().__init__(connection=connection, database_path=filepath, default_ttl=ttl)
+        super().__init__(
+            connection=connection, database_path=filepath, default_ttl=default_ttl
+        )
 
         self._setup()
 

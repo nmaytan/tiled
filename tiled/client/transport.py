@@ -40,7 +40,7 @@ class TiledTransport(httpx.BaseTransport):
             httpx.codes.PERMANENT_REDIRECT,
         ),
         always_cache: bool = False,
-        shared: bool = True,
+        shared: bool = False,
     ):
         self.cacheable_methods = cacheable_methods
         if transport is not None:

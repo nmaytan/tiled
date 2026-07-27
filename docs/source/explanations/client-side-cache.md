@@ -117,7 +117,7 @@ tiled_cache = TiledCache()
 client = httpx.Client(transport=TiledTransport(cache=tiled_cache))
 ```
 
-Further parameters can be set in the `TiledTransport` transport to further customize it, such as with `cacheable_methods` which determines which types of methods (such as `"GET"` or `"POST"`) can be cached. Additionally, the `shared` parameter value can be set, which defaults to `True`. `shared` determines if the cache is meant to serve multiple users (`True`) or if the cache should act as a private cache (`False`). If dealing with authenticated responses, `shared` must be set to `False` or caching will be blocked due to Hishel's usage of RFC 9111 standards.
+Further parameters can be set in the `TiledTransport` transport to further customize it, such as with `cacheable_methods` which determines which types of methods (such as `"GET"` or `"POST"`) can be cached. Additionally, the `shared` parameter value can be set, which defaults to `False`. `shared` determines if the cache is meant to serve multiple users (`True`) or if the cache should act as a private cache (`False`). If dealing with authenticated responses, `shared` must be set to `False` or caching will be blocked due to Hishel's usage of RFC 9111 standards.
 
 The transport intercepts requests and checks whether or not the requested data is present in the cache. If the requested data is present in the cache, then the data is provided to the user without having to go further to get the data. If the data is not in the cache, then the data must be retrieved from the server.
 

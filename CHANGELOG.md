@@ -5,6 +5,10 @@ Write the date in place of the "Unreleased" in the case a new version is release
 
 ## Unreleased
 
+### Added
+
+- Refactored the client-side cache to integrate the Hishel library, includes modifications to the transport and context.
+
 ### Fixed
 
 - Skip the `array-ref` streaming-cache update in `put_data_source` when the

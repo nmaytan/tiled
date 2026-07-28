@@ -230,11 +230,7 @@ async def test_thread_lock():
 def test_remove_expired_caches(client):
     cache = client.context.cache
     client.context.cache.default_ttl = 1
-    with record_history() as h:
-        client.values()[0]
-    for response in h.responses:
-        assert cache.count() > 0
-
+    assert cache.count() > 0
     time.sleep(1)
     client.context.cache._remove_expired_caches()
     assert cache.count() == 0

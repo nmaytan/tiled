@@ -5,6 +5,7 @@ import sys
 import threading
 import typing as tp
 import uuid
+import warnings
 from contextlib import closing
 from datetime import datetime
 from functools import wraps
@@ -367,14 +368,7 @@ class TiledCache(SyncSqliteStorage):
     ) -> Entry:
         if not self._setup_completed:
             self._setup()
-        entries = self.get_entries(key=key)
-        if not entries:
-            # Prevents any possibility of there being multiple entries on a cache hit.
-            entry = self._create_entry(request, response, key, id_)
-        else:
-            return entries[0]
-        if entry is not None:
-            self._remove_expired_caches()
+        entry = self._create_entry(request, response, key, id_)
         return entry
 
     # Generator to keep track of how many bytes were streamed to ensure
@@ -414,6 +408,7 @@ class TiledCache(SyncSqliteStorage):
                         total_size = total_size or 0  # If empty, total_size is None
 
                         while (total_size) > self.capacity:
+                            warnings.warn("Stream cannot be cached due to size.")
                             (entry_id, size) = cursor.execute(
                                 """SELECT id, size FROM entries WHERE deleted_at
                                 is NULL ORDER BY time_last_accessed ASC"""
@@ -490,34 +485,52 @@ class TiledCache(SyncSqliteStorage):
             raise RuntimeError("Cache is not connected")
         if not self.readonly:
             completed_entry = super().update_entry(id=id, new_pair=new_entry)
-            with self._lock:
-                connection = self._ensure_connection()
-                cursor = connection.cursor()
-                cursor.execute(
-                    "UPDATE entries SET time_last_accessed = ? WHERE id = ?",
-                    (
-                        datetime.now().timestamp(),
-                        id.bytes,
-                    ),
-                )
-                connection.commit()
-                cursor.close()
+            if completed_entry:
+                with self._lock:
+                    connection = self._ensure_connection()
+                    cursor = connection.cursor()
 
-            return completed_entry
+                    # 8 bytes in a REAL, and max 8 bytes for INTEGER so +8 for size
+                    # and created_at and time_last_accessed
+                    starting_size = (
+                        len(completed_entry.cache_key)
+                        + len(completed_entry.id.bytes)
+                        + 24
+                    )
+                    if completed_entry.meta.deleted_at:
+                        starting_size += 8
 
-    def _remove_expired_caches(self) -> None:
-        """Remove all expired entries from the cache."""
-        if self.connection is None or not self._setup_completed:
-            raise RuntimeError("Cache is not connected")
-        if self.readonly or self.default_ttl is None:
-            return
-        with self._lock, closing(self.connection.cursor()) as cursor:
-            entry_ids = cursor.execute(
-                "SELECT id FROM entries WHERE created_at + ? < ?",
-                [self.default_ttl, datetime.now().timestamp()],
-            ).fetchall()
-            for (entry_id,) in entry_ids:
-                self.remove_entry(uuid.UUID(bytes=entry_id))
+                    request = completed_entry.request
+                    response = completed_entry.response
+                    request_and_response_size = measure_entry_size(request, response)
+
+                    cursor.execute(
+                        "UPDATE entries SET size = ?, time_last_accessed = ? WHERE id = ?",
+                        (
+                            request_and_response_size + starting_size,
+                            datetime.now().timestamp(),
+                            id.bytes,
+                        ),
+                    )
+                    accumulated_size_state = {
+                        "size": starting_size,
+                        "exceed_handled": False,
+                    }
+                    completed_entry.request.stream = self._check_max_stream_bytes(
+                        completed_entry.id,
+                        completed_entry.request.stream,
+                        accumulated_size_state,
+                    )
+                    completed_entry.response.stream = self._check_max_stream_bytes(
+                        completed_entry.id,
+                        completed_entry.response.stream,
+                        accumulated_size_state,
+                    )
+
+                    connection.commit()
+                    cursor.close()
+
+                return completed_entry
 
     @with_thread_lock
     def clear(self):

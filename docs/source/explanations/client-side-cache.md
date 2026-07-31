@@ -42,6 +42,10 @@ The client-side cache can be in readonly mode in which entries cannot be put int
 cache = TiledCache(readonly=True)
 ```
 
+## Networked Filesystem Constraints
+
+The cache defaults to preventing the use of a networked filesystem for the location of the cache because they are unsafe for SQLite databases. This can be overrided by setting the environment variable `TILED_CLIENT_CACHE_AVOID_UNSAFE_FILESYSTEM` to `false`. This is not case-sensitive. If this environment variable is set to anything else, it will prevent the usage of networked filesystems as the location of the cache. It is highly recommended that the cache is not used at a networked filesystem location as the database used is SQLite and the file-locking mechanism may be corrupted and lead to unexpected behavior.
+
 ## Additional Cache Parameters
 
 In addition to the aforementioned constraints, `TiledCache` has other parameters that can be used to customize values.
@@ -99,7 +103,7 @@ The `size` and `count` functions are used to gather information for the cache in
 
 ## Expired Entries
 
-Once the time that a cached entry has been present in the cache exceeds the set time to live (`default_ttl` or the metadata `"hishel_ttl"`) value the entry would be considered expired. The next time `_batch_cleanup` on Hishel occurs, the entry will be deleted. 
+Once the time that a cached entry has been present in the cache exceeds the set time to live (`default_ttl` or the metadata `"hishel_ttl"`) value the entry would be considered expired. The next time `_batch_cleanup` on Hishel occurs, the entry will be deleted.
 
 ## Soft Deletion
 

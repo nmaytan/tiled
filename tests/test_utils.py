@@ -1,6 +1,8 @@
 import itertools
 import math
+from collections import namedtuple
 from pathlib import Path
+from unittest.mock import patch
 
 import dask.array as da
 import numpy as np
@@ -16,6 +18,7 @@ from tiled.utils import (
     ListView,
     OneShotCachedMap,
     ensure_specified_sql_driver,
+    is_networked_filesystem,
     parse_mimetype,
     parse_time_string,
     sanitize_uri,
@@ -661,3 +664,21 @@ def test_merge_slices(inputs, expected):
 )
 def test_dask_slices(slice_dict, shape, expected):
     assert slices_to_dask_chunks(slice_dict, shape) == expected
+
+
+@patch("tiled.utils.os.path.realpath", lambda p: p)
+@patch("tiled.utils.psutil.disk_partitions")
+def test_networked_filesystem_check(mock_partitions):
+    FakePartition = namedtuple("FakePart", ["device", "mountpoint", "fstype", "opts"])
+
+    mock_partitions.return_value = [
+        FakePartition("/dev/sda1", "/", "ext4", "rw"),
+        FakePartition("server:/export", "/mnt/nfs", "nfs4", "rw"),
+    ]
+    assert is_networked_filesystem(Path("/mnt/nfs/some/file"))
+    assert not is_networked_filesystem(Path("/another/file"))
+
+
+@patch("os.name", "nt")
+def test_networked_filesystem_check_windows():
+    assert is_networked_filesystem("\\\\fake/path")

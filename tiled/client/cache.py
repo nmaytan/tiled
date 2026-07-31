@@ -15,6 +15,8 @@ import platformdirs
 from hishel import Entry, EntryMeta, SyncSqliteStorage
 from httpcore import Request, Response
 
+from tiled.utils import is_networked_filesystem
+
 from .logger import logger
 
 CACHE_DATABASE_SCHEMA_VERSION = 2
@@ -80,16 +82,42 @@ class TiledCache(SyncSqliteStorage):
 
         self._setup_completed: bool = False
 
+        TILED_CLIENT_CACHE_AVOID_UNSAFE_FILESYSTEM = os.getenv(
+            "TILED_CLIENT_CACHE_AVOID_UNSAFE_FILESYSTEM", "true"
+        )
+
         if filepath is None:
             # Resolve this here, not at module scope, because the test suite
             # injects TILED_CACHE_DIR env var to use a temporary directory.
             TILED_CACHE_DIR = Path(
                 os.getenv("TILED_CACHE_DIR", platformdirs.user_cache_dir("tiled"))
             )
-            # TODO Consider defaulting to a temporary database, with a warning,
-            # if TILED_CACHE_DIR points to a networked filesystem. Unless perhaps
-            # flock() support can be checked (nfs version, or lock manager, etc).
-            filepath = TILED_CACHE_DIR / "http_response_cache.db"
+
+            # Defaults to a temporary, in memory, database with a warning when
+            # TILED_CACHE_DIR points to a networked filesystem.
+            if (
+                TILED_CLIENT_CACHE_AVOID_UNSAFE_FILESYSTEM.lower() != "false"
+                and is_networked_filesystem(TILED_CACHE_DIR)
+            ):
+                warnings.warn(
+                    "The Tiled cache directory points to a networked filesystem. "
+                    "Defaulting to a temporary database."
+                )
+                filepath = ":memory:"
+
+            else:
+                filepath = TILED_CACHE_DIR / "http_response_cache.db"
+        else:
+            if (
+                TILED_CLIENT_CACHE_AVOID_UNSAFE_FILESYSTEM.lower() != "false"
+                and is_networked_filesystem(filepath)
+            ):
+                warnings.warn(
+                    "The provided filepath points to a networked filesystem. "
+                    "Defaulting to a temporary database."
+                )
+                filepath = ":memory:"
+
         self._filepath = filepath
         self._capacity = None
         self._max_item_size = None

@@ -19,6 +19,7 @@ from typing import Any, Callable, Generic, Iterator, Optional, Tuple, TypeVar, U
 from urllib.parse import urlparse, urlunparse
 
 import anyio
+import psutil
 import yaml
 
 # helper for avoiding re-typing patch mimetypes
@@ -941,3 +942,49 @@ class IndexersMixin:
     def items_indexer(self) -> Any:
         warnings.warn(_MESSAGE.format(name="items"), DeprecationWarning)
         return self.items()
+
+
+def is_networked_filesystem(path: Path):
+    networked_filesystem_types = {
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "glusterfs",
+        "ceph",
+        "cephfs",
+        "lustre",
+        "afs",
+        "9p",
+        "davfs2",
+    }
+
+    # If using a Windows OS and path starts with "\\\\"", it is
+    # a networked filesystem
+    os_name = os.name
+    if os_name == "nt" and str(path).startswith("\\\\"):
+        return True
+
+    path = str(os.path.realpath(path))
+
+    partition_containing_longest_mountpoint = None
+    longest_found_mountpoint = 0
+    for partition in psutil.disk_partitions(all=True):
+        # Checks if the mount contains the path
+        if path.startswith(partition.mountpoint.rstrip(os.sep) + os.sep):
+            # Finds the most specific mount
+            if (
+                partition_containing_longest_mountpoint is None
+                or len(partition.mountpoint) > longest_found_mountpoint
+            ):
+                partition_containing_longest_mountpoint = partition
+                longest_found_mountpoint = len(partition.mountpoint)
+
+    # Takes the fstype of the most specific mount, with additional checks for Windows OS
+    if (
+        partition_containing_longest_mountpoint.fstype.lower()
+        in networked_filesystem_types
+        or "remote" in partition_containing_longest_mountpoint.opts.lower()
+    ):
+        return True
+    return False

@@ -30,6 +30,7 @@ dependencies = [
     "pydantic-settings >=2, <2.12.0",
     "pyyaml",
     "typer",
+    "psutil",
 ]
 
 classifiers = [
@@ -135,6 +136,7 @@ client = [
     "watchfiles",
     "xarray",
     "zstandard",
+    "hishel",
 ]
 # These are used by the client/server to more efficiently compress.
 # They fall back to gzip (which is slower) if these are not installed.
@@ -165,6 +167,7 @@ minimal-client = [
     "stamina",
     "watchfiles",
     "websockets",
+    "psutil",
 ]
 # These are the requirements needed for basic server functionality.
 minimal-server = [
@@ -190,6 +193,7 @@ minimal-server = [
     "starlette >=0.48.0",
     "uvicorn[standard]",
     "zarr",
+    "psutil",
 ]
 # This is the "kichen sink" fully-featured server dependency set.
 server = [

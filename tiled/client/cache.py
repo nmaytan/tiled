@@ -149,6 +149,7 @@ class TiledCache(SyncSqliteStorage):
     def _setup(self) -> None:
         if not self._setup_completed:
             if not self.connection:
+                Path(self._filepath).parent.mkdir(parents=True, exist_ok=True)
                 # The methods in the Cache storage object will not try to write when
                 # in readonly mode. For extra safety, we open a readonly connection
                 # to the database, so that SQLite itself will prohibit writing.
@@ -370,20 +371,20 @@ class TiledCache(SyncSqliteStorage):
                 "SELECT SUM(size) FROM entries WHERE deleted_at is NULL"
             ).fetchone()
             total_size = total_size or 0  # If empty, total_size is None
-
             # This is the LRU eviction.
             while (total_size) > self.capacity:
                 (entry_id, size) = cursor.execute(
                     """SELECT id, size FROM entries WHERE deleted_at is NULL ORDER BY time_last_accessed ASC"""
                 ).fetchone()
 
-                # remove_entry is to soft delete in case stream is still being read.
-                # Corresponding stream entries will be deleted at cleanup.
-                self.remove_entry(uuid.UUID(bytes=entry_id))
+                warnings.warn(
+                    f"If reading data from cache with entry ID {entry_id}, "
+                    f"stream may have been interrupted due to cache eviction."
+                )
+                cursor.execute("DELETE FROM entries WHERE id is ?", (entry_id,))
                 total_size -= size
 
             self.connection.commit()
-
             return entry
 
     @with_thread_lock
@@ -436,14 +437,17 @@ class TiledCache(SyncSqliteStorage):
                         total_size = total_size or 0  # If empty, total_size is None
 
                         while (total_size) > self.capacity:
-                            warnings.warn("Stream cannot be cached due to size.")
                             (entry_id, size) = cursor.execute(
                                 """SELECT id, size FROM entries WHERE deleted_at
                                 is NULL ORDER BY time_last_accessed ASC"""
                             ).fetchone()
-                            self.remove_entry(
-                                uuid.UUID(bytes=entry_id)
-                            )  # This is to soft delete in case stream is still being read
+                            warnings.warn(
+                                f"If reading data from cache with entry ID {entry_id}, "
+                                f"stream may have been interrupted due to cache eviction."
+                            )
+                            cursor.execute(
+                                "DELETE FROM entries WHERE id is ?", (entry_id.bytes,)
+                            )
                             total_size -= size
             yield chunk
 
@@ -531,7 +535,6 @@ class TiledCache(SyncSqliteStorage):
                     request = completed_entry.request
                     response = completed_entry.response
                     request_and_response_size = measure_entry_size(request, response)
-
                     cursor.execute(
                         "UPDATE entries SET size = ?, time_last_accessed = ? WHERE id = ?",
                         (

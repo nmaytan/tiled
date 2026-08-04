@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import os
 import sqlite3
 import threading
 import time
@@ -40,10 +41,16 @@ def network_client():
     FakePartition = namedtuple(
         "FakePartition", ["device", "mountpoint", "fstype", "opts"]
     )
-    mock_partitions = [
-        FakePartition("/dev/sda1", "/", "ext4", "rw"),
-        FakePartition("server:/export", "/mnt/nfs", "nfs4", "rw"),
-    ]
+    if os.name == "nt":
+        mock_partitions = [
+            FakePartition("\\dev\\sda1", "\\", "ext4", "rw"),
+            FakePartition("server:\\export", "\\mnt\\nfs", "nfs4", "rw"),
+        ]
+    else:
+        mock_partitions = [
+            FakePartition("/dev/sda1", "/", "ext4", "rw"),
+            FakePartition("server:/export", "/mnt/nfs", "nfs4", "rw"),
+        ]
     monkeypatch.setattr(
         "tiled.utils.psutil.disk_partitions",
         lambda *a, **k: mock_partitions,
@@ -54,7 +61,6 @@ def network_client():
 
 
 def test_cache(client, tmpdir):
-    # assert False
     cache = client.context.cache
     client.context.cache.clear()
     before_count = cache.count()

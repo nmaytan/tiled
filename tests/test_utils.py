@@ -1,5 +1,6 @@
 import itertools
 import math
+import os
 from collections import namedtuple
 from pathlib import Path
 from unittest.mock import patch
@@ -670,13 +671,20 @@ def test_dask_slices(slice_dict, shape, expected):
 @patch("tiled.utils.psutil.disk_partitions")
 def test_networked_filesystem_check(mock_partitions):
     FakePartition = namedtuple("FakePart", ["device", "mountpoint", "fstype", "opts"])
-
-    mock_partitions.return_value = [
-        FakePartition("/dev/sda1", "/", "ext4", "rw"),
-        FakePartition("server:/export", "/mnt/nfs", "nfs4", "rw"),
-    ]
-    assert is_networked_filesystem(Path("/mnt/nfs/some/file"))
-    assert not is_networked_filesystem(Path("/another/file"))
+    if os.name == "nt":
+        mock_partitions.return_value = [
+            FakePartition("\\dev\\sda1", "\\", "ext4", "rw"),
+            FakePartition("server:\\export", "\\mnt\\nfs", "nfs4", "rw"),
+        ]
+        assert is_networked_filesystem(Path("\\mnt\\nfs\\some\\file"))
+        assert not is_networked_filesystem(Path("\\another\\file"))
+    else:
+        mock_partitions.return_value = [
+            FakePartition("/dev/sda1", "/", "ext4", "rw"),
+            FakePartition("server:/export", "/mnt/nfs", "nfs4", "rw"),
+        ]
+        assert is_networked_filesystem(Path("/mnt/nfs/some/file"))
+        assert not is_networked_filesystem(Path("/another/file"))
 
 
 @patch("os.name", "nt")

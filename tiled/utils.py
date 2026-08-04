@@ -981,7 +981,7 @@ def is_networked_filesystem(path: Path):
                 longest_found_mountpoint = len(partition.mountpoint)
 
     # Takes the fstype of the most specific mount, with additional checks for Windows OS
-    if (
+    if partition_containing_longest_mountpoint and (
         partition_containing_longest_mountpoint.fstype.lower()
         in networked_filesystem_types
         or "remote" in partition_containing_longest_mountpoint.opts.lower()

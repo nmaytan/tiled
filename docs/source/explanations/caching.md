@@ -30,9 +30,9 @@ client.context.cache.filepath  # locate SQLite file
 
 # Customize the cache.
 
-from tiled.client.cache import TiledCache
+from tiled.client.cache import Cache
 
-cache = TiledCache(
+cache = Cache(
     capacity=500_000_000,  # bytes
     max_item_size=500_000,  # bytes
     filepath="path/to/my_cache.db",

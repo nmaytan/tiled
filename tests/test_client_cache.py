@@ -13,7 +13,7 @@ import pytest
 from tiled.adapters.array import ArrayAdapter
 from tiled.adapters.mapping import MapAdapter
 from tiled.client import Context, from_context, record_history
-from tiled.client.cache import ThreadingMode, TiledCache, with_thread_lock
+from tiled.client.cache import Cache, ThreadingMode, with_thread_lock
 from tiled.server.app import build_app
 
 tree = MapAdapter(
@@ -28,7 +28,7 @@ tree = MapAdapter(
 @pytest.fixture(scope="module")
 def client():
     app = build_app(tree)
-    with Context.from_app(app, cache=TiledCache()) as context:
+    with Context.from_app(app, cache=Cache()) as context:
         yield from_context(context)
 
 
@@ -56,7 +56,7 @@ def network_client():
         lambda *a, **k: mock_partitions,
     )
     app = build_app(tree)
-    with Context.from_app(app, cache=TiledCache()) as context:
+    with Context.from_app(app, cache=Cache()) as context:
         yield from_context(context)
 
 
@@ -183,7 +183,7 @@ def test_readonly_cache(client):
 
         # Now use the same file as readonly cache.
         filepath = client.context.cache.filepath
-        ro_cache = client.context.cache = TiledCache(filepath=filepath, readonly=True)
+        ro_cache = client.context.cache = Cache(filepath=filepath, readonly=True)
 
         # Still cached (from before)
         with record_history() as h:

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The client-side cache makes retrieving data faster, especially when it comes to large amounts of data. The cache integrates the Hishel library. If the cache is set in the transport (`TiledTransport`), then when a request is intercepted by the transport it will check if the requested information is already in the cache prior to going to the server for the requested data. If the data is already stored in the cache, that is considered a cache hit and the data will be given to the user. Otherwise, that is a cache miss, and the data will have to be retrieved from the server.
+The client-side cache makes retrieving data faster, especially when it comes to large amounts of data. The cache integrates the Hishel library. If the cache is set in the transport (`Transport`), then when a request is intercepted by the transport it will check if the requested information is already in the cache prior to going to the server for the requested data. If the data is already stored in the cache, that is considered a cache hit and the data will be given to the user. Otherwise, that is a cache miss, and the data will have to be retrieved from the server.
 
 ## SQL Database Set Up
 
@@ -25,7 +25,7 @@ The cache has size constraints when it comes to:
 The former can be controlled by the setting of the `capacity` variable and the latter through `max_item_size` at the time of the cache creation. For example, the following code will have a limit of 2 GB for entry sizes and 4 GB for the overall cache size:
 
 ```
-cache = TiledCache(max_item_size=2_000_000_000, capacity=4_000_000_000)
+cache = Cache(max_item_size=2_000_000_000, capacity=4_000_000_000)
 ```
 
 The default max item size is 500,000, and the default capacity is 500,000,000. The units are bytes.
@@ -39,7 +39,7 @@ The size of each entry is contributed by anything that is put into the SQL table
 The client-side cache can be in readonly mode in which entries cannot be put into the cache and any entries that are already in the cache cannot be updated/modified (including the value of `time_last_accessed`, which is used for LRU eviction). The default is that the cache will not be readonly, however it can be set to be readonly as shown below:
 
 ```
-cache = TiledCache(readonly=True)
+cache = Cache(readonly=True)
 ```
 
 ## Networked Filesystem Constraints
@@ -48,7 +48,7 @@ The cache defaults to preventing the use of a networked filesystem for the locat
 
 ## Additional Cache Parameters
 
-In addition to the aforementioned constraints, `TiledCache` has other parameters that can be used to customize values.
+In addition to the aforementioned constraints, `Cache` has other parameters that can be used to customize values.
 
 The `filepath` parameter can be used to set the location that the cache will be stored at. It defaults to the user's Tiled directory / "http_response_cache.db".
 
@@ -56,7 +56,7 @@ The `default_ttl` parameter, which stands for "Time to Live", determines how lon
 
 ## Streaming
 
-Data may be streamed through the client-side cache. This streaming feature is largely handled through Hishel, however the size of the streamed data is monitored within `TiledCache`. This size management is done through the use of a generator, `_check_max_stream_bytes`. This generator keeps track of the accumulated size as the stream is occurring and will remove the cached entry in the event that the size exceeds the maximum item size. If this happens, the entry is soft-deleted so that the stream may continue to provide data in the response (the only impact would be that the streamed data would not be cached, the stream will not be halted).
+Data may be streamed through the client-side cache. This streaming feature is largely handled through Hishel, however the size of the streamed data is monitored within `Cache`. This size management is done through the use of a generator, `_check_max_stream_bytes`. This generator keeps track of the accumulated size as the stream is occurring and will remove the cached entry in the event that the size exceeds the maximum item size. If this happens, the entry is soft-deleted so that the stream may continue to provide data in the response (the only impact would be that the streamed data would not be cached, the stream will not be halted).
 
 ## Thread Safety
 
@@ -109,24 +109,24 @@ Once the time that a cached entry has been present in the cache exceeds the set 
 
 The `remove_entry` function from Hishel is used when removing entries from the cache. This soft deletes the cached entry by marking the entry in the table. The entry does not become immediately deleted but instead is deleted after one hour by `_batch_cleanup`. The reason for soft deleting the entries instead of hard (or immediately) deleting the entries is because of the lazy method Hishel uses for handling streaming chunks. By soft deleting, if a stream is still occurring it will have time to finish streaming before the stream gets disrupted when a response is going through to the user. If the entries were to be hard deleted, it would disrupt the stream. After the time passes, all the entries that have been marked with being soft deleted will be removed from the cache.
 
-## TiledTransport
+## Transport
 
 ### Overview
 
-The transport that is intended to be used with the cache is `TiledTransport`. A client can be set up with this transport as follows:
+The transport that is intended to be used with the cache is `Transport`. A client can be set up with this transport as follows:
 
 ```
-tiled_cache = TiledCache()
+tiled_cache = Cache()
 
-client = httpx.Client(transport=TiledTransport(cache=tiled_cache))
+client = httpx.Client(transport=Transport(cache=tiled_cache))
 ```
 
-Further parameters can be set in the `TiledTransport` transport to further customize it, such as with `cacheable_methods` which determines which types of methods (such as `"GET"` or `"POST"`) can be cached. Additionally, the `shared` parameter value can be set, which defaults to `False`. `shared` determines if the cache is meant to serve multiple users (`True`) or if the cache should act as a private cache (`False`). If dealing with authenticated responses, `shared` must be set to `False` or caching will be blocked due to Hishel's usage of RFC 9111 standards.
+Further parameters can be set in the `Transport` transport to further customize it, such as with `cacheable_methods` which determines which types of methods (such as `"GET"` or `"POST"`) can be cached. Additionally, the `shared` parameter value can be set, which defaults to `False`. `shared` determines if the cache is meant to serve multiple users (`True`) or if the cache should act as a private cache (`False`). If dealing with authenticated responses, `shared` must be set to `False` or caching will be blocked due to Hishel's usage of RFC 9111 standards.
 
 The transport intercepts requests and checks whether or not the requested data is present in the cache. If the requested data is present in the cache, then the data is provided to the user without having to go further to get the data. If the data is not in the cache, then the data must be retrieved from the server.
 
 ### Additional Transport Parameters
 
-A parameter that can be set during the initialization of  `TiledTransport` is `transport`. `transport` determines what base transport is being used, with the defaults being `httpx.HTTPTransport`. Additionally, with a `cache` parameter present, the `transport` is wrapped with `SyncCacheTransport` from Hishel, which allows Hishel's transport to carry out its method for handling requests, and it handles certain activities like writes.
+A parameter that can be set during the initialization of `Transport` is `transport`. `transport` determines what base transport is being used, with the defaults being `httpx.HTTPTransport`. Additionally, with a `cache` parameter present, the `transport` is wrapped with `SyncCacheTransport` from Hishel, which allows Hishel's transport to carry out its method for handling requests, and it handles certain activities like writes.
 
 Another parameter that can be set is `limits`. This parameter determines limits for client behaviors, such as the maximum number of concurrent connections.

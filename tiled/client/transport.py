@@ -8,12 +8,12 @@ import httpx
 from hishel import CacheOptions, SpecificationPolicy
 from hishel.httpx import SyncCacheTransport
 
-from .cache import TiledCache
+from .cache import Cache
 from .logger import collect_request, collect_response, log_request, log_response, logger
 from .utils import TiledResponse
 
 
-class TiledTransport(httpx.BaseTransport):
+class Transport(httpx.BaseTransport):
     """Custom transport, implementing caching.
 
     Args:
@@ -29,7 +29,7 @@ class TiledTransport(httpx.BaseTransport):
         self,
         *,
         transport: tp.Optional[httpx.BaseTransport] = None,
-        cache: tp.Optional[TiledCache] = None,
+        cache: tp.Optional[Cache] = None,
         limits: tp.Optional[httpx.Limits] = None,
         cacheable_methods: tp.Tuple[str, ...] = ("GET",),
         cacheable_status_codes: tp.Tuple[int, ...] = (
@@ -88,14 +88,15 @@ class TiledTransport(httpx.BaseTransport):
         response = self._active_transport.handle_request(request)
         response.__class__ = TiledResponse
         response.request = request
-        if self.cache is not None:
-            from_cache = False
-            from_cache = response.extensions.get("hishel_from_cache")
-            if from_cache:
-                logger.info("Cache hit")
-            else:
-                logger.info("Cache miss")
         if __debug__:
+            # Log whether there was a cache hit or miss
+            if self.cache is not None:
+                from_cache = response.extensions.get("hishel_from_cache")
+                if from_cache:
+                    logger.debug("Cache hit")
+                else:
+                    logger.debug("Cache miss")
+
             # Log the actual server traffic, not the cached response.
             log_response(response)
             # But, below _collect_ the response with the content in it.

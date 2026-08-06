@@ -67,7 +67,7 @@ def measure_entry_size(request, response):
     return size
 
 
-class TiledCache(SyncSqliteStorage):
+class Cache(SyncSqliteStorage):
     def __init__(
         self,
         *,

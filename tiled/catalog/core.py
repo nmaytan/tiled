@@ -36,11 +36,13 @@ REQUIRED_REVISION = ALL_REVISIONS[0]
 
 async def initialize_database(engine: AsyncEngine):
     # The definitions in .orm alter Base.metadata.
-    # The graph (splash-links) tables also live in the catalog database and
-    # attach to Base.metadata, so importing them here ensures create_all
-    # provisions them on fresh databases (existing databases get them via the
-    # Alembic migration c31f6a1d7e20).
-    from ..graph import orm as graph_orm  # noqa: F401
+    # TODO(access-tags): The graph (splash-links) tables also live in the
+    # catalog database and attach to Base.metadata. They have not yet been
+    # converted to the access_tags schema, so importing tiled.graph.orm here
+    # would make create_all fail (its tables hold foreign keys into a table
+    # that no longer exists). Restore this import once the graph ORM is
+    # converted:
+    #     from ..graph import orm as graph_orm  # noqa: F401
     from . import orm  # noqa: F401
 
     async with engine.connect() as connection:
@@ -49,20 +51,32 @@ async def initialize_database(engine: AsyncEngine):
             await connection.execute(text("create extension btree_gin;"))
         # Create all tables.
         await connection.run_sync(Base.metadata.create_all)
-        root_access_blob_id = await connection.scalar(
-            select(orm.NodeAccessBlob.access_blob_id).where(
-                orm.NodeAccessBlob.node_id == 0
+        # The persisted catalog root node (nodes.id = 0, inserted by the
+        # nodes_closure DDL listener) is always tagged 'public': under
+        # tag-based access control, a node with no tags is inaccessible, and
+        # the root must never block traversal to its children. The
+        # association requires the 'public' tag row to exist (foreign key),
+        # so it is created here if missing. This is the only place outside of
+        # the access tags compiler that inserts an access tag.
+        # On a server without an access policy, tags are ignored and
+        # these rows are inert.
+        public_tag_id = await connection.scalar(
+            select(orm.AccessTag.id).where(orm.AccessTag.name == "public")
+        )
+        if public_tag_id is None:
+            result = await connection.execute(
+                insert(orm.AccessTag).values(name="public", is_public=True)
+            )
+            public_tag_id = result.inserted_primary_key[0]
+        root_is_tagged = await connection.scalar(
+            select(orm.NodeAccessTag.tag_id).where(
+                orm.NodeAccessTag.node_id == 0,
+                orm.NodeAccessTag.tag_id == public_tag_id,
             )
         )
-        if root_access_blob_id is None:
-            result = await connection.execute(
-                insert(orm.AccessBlob).values(kind="tags", tags=["public"])
-            )
+        if root_is_tagged is None:
             await connection.execute(
-                insert(orm.NodeAccessBlob).values(
-                    node_id=0,
-                    access_blob_id=result.inserted_primary_key[0],
-                )
+                insert(orm.NodeAccessTag).values(node_id=0, tag_id=public_tag_id)
             )
         if engine.dialect.name == "sqlite":
             # Use write-ahead log mode. This persists across all future connections

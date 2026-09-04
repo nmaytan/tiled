@@ -30,7 +30,6 @@ from urllib.parse import urlparse
 import anyio
 from fastapi import HTTPException
 from sqlalchemy import (
-    String,
     delete,
     exists,
     false,
@@ -125,7 +124,6 @@ from ..utils import (
     import_object,
     path_from_uri,
 )
-from ..type_aliases import AccessBlob
 from . import orm
 from .core import check_catalog_database, initialize_database
 from .explain import ExplainAsyncSession

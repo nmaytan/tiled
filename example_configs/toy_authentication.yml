@@ -35,4 +35,4 @@ trees:
       uri: "sqlite+aiosqlite:///./example_configs/catalog/catalog.db"
       writable_storage: "./example_configs/catalog/data"
       init_if_not_exists: true
-      top_level_access_blob: {"tags": ["public"]}
+      top_level_access_tags: ["public"]

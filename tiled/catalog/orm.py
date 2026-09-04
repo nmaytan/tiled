@@ -1,7 +1,6 @@
 from typing import List
 
 from sqlalchemy import (
-    ARRAY,
     JSON,
     BigInteger,
     Boolean,
@@ -11,7 +10,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    String,
     Table,
     Unicode,
     event,
@@ -21,7 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.schema import CheckConstraint, PrimaryKeyConstraint, UniqueConstraint
+from sqlalchemy.schema import PrimaryKeyConstraint, UniqueConstraint
 from sqlalchemy.sql import func
 
 from ..server.schemas import Management
@@ -30,7 +28,6 @@ from .base import Base
 
 # Use JSON with SQLite and JSONB with PostgreSQL.
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
-AccessTagsVariant = JSON(none_as_null=True).with_variant(ARRAY(String()), "postgresql")
 
 
 class Timestamped:
@@ -92,10 +89,13 @@ class Node(Timestamped, Base):
         backref="node",
         passive_deletes=True,
     )
-    access_blob = relationship(
-        "AccessBlob",
-        secondary="node_access_blobs",
-        uselist=False,
+    # Many-to-many relationship to AccessTag through the node_access_tags
+    # association table. Writable: assigning/appending AccessTag objects
+    # inserts/deletes rows in node_access_tags (never in access_tags itself).
+    # passive_deletes defers cleanup of association rows to the DB-level
+    # ON DELETE CASCADE when a node is deleted.
+    access_tags: Mapped[List["AccessTag"]] = relationship(
+        secondary="node_access_tags",
         lazy="selectin",
         passive_deletes=True,
     )
@@ -145,45 +145,228 @@ class NodesClosure(Base):
     )
 
 
-class AccessBlob(Base):
+class AccessTag(Timestamped, Base):
     """
-    An access blob contains a set of tags that are used to control access to nodes.
-    May otherwise contain information indicating that a node is "user-owned".
+    A named access tag.
 
-    Associated with catalog nodes and graph links through separate association
-    tables.
+    AccessTags are the unit of access control: nodes carry a set of tags, and
+    principals are granted access by being associated with one or more tags.
+    The allowed operations for a principal on a node are determined by the
+    scopes bound to their AccessTagPrincipalScope rows.
+
+    A tag with is_public=True grants read access to unauthenticated requests.
+
+    Ownership is tracked via AccessTagOwner rows; tag owners may apply tags
+    without being a server administrator.
     """
 
-    __tablename__ = "access_blobs"
+    __tablename__ = "access_tags"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    kind = Column(Enum("user", "tags", name="access_kind"), nullable=False)
-    username = Column(String, nullable=True)
-    tags = Column(AccessTagsVariant, nullable=True)
+    name = Column(Unicode(255), nullable=False, unique=True)
+    is_public = Column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+    principal_scopes: Mapped[List["AccessTagPrincipalScope"]] = relationship(
+        back_populates="tag",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    owners: Mapped[List["AccessTagOwner"]] = relationship(
+        back_populates="tag",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
-        CheckConstraint(
-            "(username IS NOT NULL AND tags IS NULL) OR "
-            "(username IS NULL AND tags IS NOT NULL)",
-            name="ck_access_blob_user_xor_tags",
+        # Supports enumerating/filtering public tags for unauthenticated requests.
+        Index("idx_access_tags_is_public", "is_public"),
+    )
+
+
+class NodeAccessTag(Base):
+    """
+    Association table mapping Nodes to Access Tags (many-to-many).
+    Used to perform lookups in both directions, i.e.:
+        - Which tags are on this node? (served by the primary key)
+        - Which nodes have this tag? (served by the secondary index)
+    """
+
+    __tablename__ = "node_access_tags"
+
+    node_id = Column(
+        Integer,
+        ForeignKey("nodes.id", name="fk_node_access_tags_node", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tag_id = Column(
+        Integer,
+        ForeignKey(
+            "access_tags.id", name="fk_node_access_tags_tag", ondelete="CASCADE"
         ),
-        # Tight partial index for owner lookups used by access_blob_filter.
+        nullable=False,
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("node_id", "tag_id", name="node_access_tags_pkey"),
+        # Covering index for the reverse (tag -> nodes) direction.
+        Index("idx_node_access_tags_tag_id_node_id", "tag_id", "node_id"),
+    )
+
+
+class AccessTagsPrincipal(Timestamped, Base):
+    """
+    A principal (human user or service account) that can be granted access
+    via AccessTags.
+
+    The name is the canonical identifier used in authentication tokens and group
+    memberships.  Scopes granted to this principal for a given tag are stored in
+    AccessTagPrincipalScope rows; ownership of a tag is stored in AccessTagOwner
+    rows.
+    """
+
+    __tablename__ = "access_tags_principals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(Unicode(255), nullable=False, unique=True)
+
+    tag_scopes: Mapped[List["AccessTagPrincipalScope"]] = relationship(
+        back_populates="principal",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    owned_tags: Mapped[List["AccessTagOwner"]] = relationship(
+        back_populates="principal",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class Scope(Base):
+    """
+    A named permission scope (e.g. 'read:data', 'write:data', 'create:node').
+
+    The set of valid scopes is defined by the server configuration.  A Scope
+    row is created the first time a scope name appears in a tag definition so
+    that AccessTagPrincipalScope can reference it by ID.
+    """
+
+    __tablename__ = "scopes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(Unicode(255), nullable=False, unique=True)
+
+    principal_tags: Mapped[List["AccessTagPrincipalScope"]] = relationship(
+        back_populates="scope",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class AccessTagPrincipalScope(Base):
+    """
+    Three-way junction (association table): a Principal is granted a Scope on
+    all nodes carrying an AccessTag.
+
+    Used to check:
+        - What scopes does a principal have on a given node per the node's tags?
+        - What tags does a principal have a given scope on, and thus how should
+          nodes be filtered for that principal?
+    """
+
+    __tablename__ = "access_tag_principal_scopes"
+
+    tag_id = Column(
+        Integer,
+        ForeignKey(
+            "access_tags.id",
+            name="fk_access_tag_principal_scopes_access_tag",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    principal_id = Column(
+        Integer,
+        ForeignKey(
+            "access_tags_principals.id",
+            name="fk_access_tag_principal_scopes_principal",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    scope_id = Column(
+        Integer,
+        ForeignKey(
+            "scopes.id",
+            name="fk_access_tag_principal_scopes_scope",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    tag: Mapped["AccessTag"] = relationship(back_populates="principal_scopes")
+    principal: Mapped["AccessTagsPrincipal"] = relationship(
+        back_populates="tag_scopes"
+    )
+    scope: Mapped["Scope"] = relationship(back_populates="principal_tags")
+
+    __table_args__ = (
+        # Serves '(tag, principal) -> scopes' probes, e.g. checking scopes on a
+        # node given its tags.
+        PrimaryKeyConstraint(
+            "tag_id", "principal_id", "scope_id", name="access_tag_principal_scopes_pkey"
+        ),
+        # Covering index serving '(principal, scope) -> tags' lookups, used to
+        # filter nodes visible to a principal.
         Index(
-            "ix_access_blobs_username_user",
-            "username",
-            postgresql_where=text("kind = 'user' AND username IS NOT NULL"),
-            sqlite_where=text("kind = 'user' AND username IS NOT NULL"),
+            "idx_access_tag_principal_scopes_principal_scope",
+            "principal_id",
+            "scope_id",
+            "tag_id",
         ),
-        # Helps narrow to the relevant subset for tags/user branches quickly,
-        # including SQLite where tags membership itself is not index-friendly.
-        Index("ix_access_blobs_kind_id", "kind", "id"),
-        # PostgreSQL can index array overlap checks directly.
-        Index(
-            "ix_access_blobs_tags_gin",
-            "tags",
-            postgresql_using="gin",
-            postgresql_where=text("kind = 'tags' AND tags IS NOT NULL"),
+        # Supports FK cascade when a Scope row is deleted (e.g. during
+        # reconciliation of the configured scope set).
+        Index("idx_access_tag_principal_scopes_scope_id", "scope_id"),
+    )
+
+
+class AccessTagOwner(Base):
+    """
+    Association table which records that a Principal owns an AccessTag and may
+    apply that tag to a node (if scopes permit).
+    """
+
+    __tablename__ = "access_tag_owners"
+
+    tag_id = Column(
+        Integer,
+        ForeignKey(
+            "access_tags.id", name="fk_access_tag_owners_access_tag", ondelete="CASCADE"
         ),
+        nullable=False,
+    )
+    principal_id = Column(
+        Integer,
+        ForeignKey(
+            "access_tags_principals.id",
+            name="fk_access_tag_owners_principal",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    tag: Mapped["AccessTag"] = relationship(back_populates="owners")
+    principal: Mapped["AccessTagsPrincipal"] = relationship(
+        back_populates="owned_tags"
+    )
+
+    __table_args__ = (
+        # Serves 'owners of a tag' and exact (tag, principal) membership probes.
+        PrimaryKeyConstraint("tag_id", "principal_id", name="access_tag_owners_pkey"),
+        # Serves 'tags owned by a principal' lookups and FK cascade on
+        # principal deletion.
+        Index("idx_access_tag_owners_principal_id", "principal_id"),
     )
 
 

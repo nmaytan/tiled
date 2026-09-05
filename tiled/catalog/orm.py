@@ -180,8 +180,13 @@ class AccessTag(Timestamped, Base):
     )
 
     __table_args__ = (
-        # Supports enumerating/filtering public tags for unauthenticated requests.
-        Index("idx_access_tags_is_public", "is_public"),
+        # Partial index for public tags only, covering name-only queries
+        Index(
+            "idx_access_tags_is_public",
+            "name",
+            postgresql_where=text("is_public"),
+            sqlite_where=text("is_public"),
+        ),
     )
 
 

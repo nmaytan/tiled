@@ -48,11 +48,7 @@ from ..config import (
     construct_build_app_kwargs,
     parse_configs,
 )
-# TODO(access-tags): The graph (splash-links) feature has not yet been
-# converted to the access_tags schema, so its modules do not currently
-# import. Restore this import (and the include_router call below) once
-# tiled.graph is converted:
-#     from ..graph.router import create_router as get_links_router
+from ..graph.router import create_router as get_links_router
 from ..media_type_registration import (
     CompressionRegistry,
     SerializationRegistry,
@@ -439,13 +435,11 @@ def build_app(
     # table), so it is only available when serving a catalog-backed tree.
     # Note this is independent of `database:` config, which configures the
     # unrelated authn/session database.
-    # TODO(access-tags): Re-enable once tiled.graph is converted to the
-    # access_tags schema (see import above).
-    # catalog_context = getattr(tree, "context", None)
-    # if catalog_context is not None:
-    #     app.include_router(
-    #         get_links_router(lambda: catalog_context.database_settings)
-    #     )
+    catalog_context = getattr(tree, "context", None)
+    if catalog_context is not None:
+        app.include_router(
+            get_links_router(lambda: catalog_context.database_settings)
+        )
 
     # The Tree and Authenticator have the opportunity to add custom routes to
     # the server here. (Just for example, a Tree of BlueskyRuns uses this

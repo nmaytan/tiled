@@ -2422,16 +2422,16 @@ def access_tags_filter(query, tree):
         # there are no rows returned.
         condition = false()
     else:
-        # Nodes carrying at least one of the given tags. Portable across
-        # SQLite and PostgreSQL: resolves names via the unique index on
-        # access_tags.name, then finds nodes via the covering
-        # (tag_id, node_id) index on node_access_tags.
-        tags_match = (
+        # Nodes carrying at least one of the given access tags.
+        # EXISTS is used (vs IN) as it is much more preformant in SQLite,
+        # though performance in Postgres appears similar for both.
+        condition = (
             select(orm.NodeAccessTag.node_id)
             .join(orm.AccessTag, orm.AccessTag.id == orm.NodeAccessTag.tag_id)
+            .where(orm.NodeAccessTag.node_id == orm.Node.id)
             .where(orm.AccessTag.name.in_(query.tags))
+            .exists()
         )
-        condition = orm.Node.id.in_(tags_match)
 
     return tree.new_variation(conditions=tree.conditions + [condition])
 

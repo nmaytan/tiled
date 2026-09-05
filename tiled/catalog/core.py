@@ -6,6 +6,7 @@ from .base import Base
 
 # This is list of all valid revisions (from current to oldest).
 ALL_REVISIONS = [
+    "3bc110ce44e9",
     "de302a096358",
     "c31f6a1d7e20",
     "9bc9b57294b9",
@@ -35,14 +36,8 @@ REQUIRED_REVISION = ALL_REVISIONS[0]
 
 
 async def initialize_database(engine: AsyncEngine):
-    # The definitions in .orm alter Base.metadata.
-    # TODO(access-tags): The graph (splash-links) tables also live in the
-    # catalog database and attach to Base.metadata. They have not yet been
-    # converted to the access_tags schema, so importing tiled.graph.orm here
-    # would make create_all fail (its tables hold foreign keys into a table
-    # that no longer exists). Restore this import once the graph ORM is
-    # converted:
-    #     from ..graph import orm as graph_orm  # noqa: F401
+    from ..graph import orm as graph_orm  # noqa: F401
+
     from . import orm  # noqa: F401
 
     async with engine.connect() as connection:

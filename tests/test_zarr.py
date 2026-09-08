@@ -242,10 +242,9 @@ async def test_zarr_structure_ahead_of_data_503(prefix, path, app):
 @pytest.mark.parametrize("path", ["/pathological/structure_misaligned"])
 @pytest.mark.asyncio
 async def test_zarr_incompatible_structure_returns_422(prefix, path, app):
-    # Serve an array whose stored structure claims more frames than the
-    # underlying data has, mimicking a catalog that is ahead of the file
-    # during a streaming append. The read should surface as a retryable
-    # HTTP 503, not an opaque 500.
+    # Serve an array whose stored structure is incompatible with the data in a
+    # way that retrying cannot fix (trailing dimensions disagree). This is a
+    # permanent error, surfaced as HTTP 422.
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",

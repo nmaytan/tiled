@@ -738,7 +738,17 @@ def build_app(
             if app.state.access_policy is not None and hasattr(
                 app.state.access_policy, "access_tags_parser"
             ):
-                await app.state.access_policy.access_tags_parser.connect()
+                # Access tag definitions live in the catalog database, so the
+                # parser connects with the catalog's own database settings.
+                access_tags_catalog_context = getattr(tree, "context", None)
+                if access_tags_catalog_context is None:
+                    raise ValueError(
+                        "This access policy reads access tags from the catalog "
+                        "database, so it requires a catalog-backed tree."
+                    )
+                await app.state.access_policy.access_tags_parser.connect(
+                    access_tags_catalog_context.database_settings
+                )
 
             async def purge_expired_sessions_and_api_keys():
                 PURGE_INTERVAL = 600  # seconds

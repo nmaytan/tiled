@@ -68,7 +68,6 @@ class TagBasedAccessPolicy(AccessPolicy):
         self,
         *,
         provider,
-        tags_db,
         access_tags_parser,
         scopes=None,
     ):
@@ -76,7 +75,9 @@ class TagBasedAccessPolicy(AccessPolicy):
         self.scopes = scopes if (scopes is not None) else ALL_SCOPES
 
         access_tags_parser = import_object(access_tags_parser)
-        self.access_tags_parser = access_tags_parser.from_uri(tags_db["uri"])
+        # The parser reads tag definitions from the catalog database; it is
+        # connected with the catalog's database settings at server startup.
+        self.access_tags_parser = access_tags_parser()
         self.is_tag_defined = self.access_tags_parser.is_tag_defined
         self.get_public_tags = self.access_tags_parser.get_public_tags
         self.get_scopes_from_tag = self.access_tags_parser.get_scopes_from_tag

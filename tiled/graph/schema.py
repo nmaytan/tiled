@@ -135,9 +135,8 @@ async def _effective_access_tags(info: Info, record: EntityRecord) -> AccessTags
     in tiled.graph.orm). Resolve whichever is authoritative.
     """
     if record.node_id is not None:
-        return await _store(info).get_node_access_tags(
-            record.node_id
-        ) or AccessTags()
+        node_tags = await _store(info).get_node_access_tags(record.node_id)
+        return AccessTags(node_tags or ())
     return AccessTags(record.access_tags or ())
 
 

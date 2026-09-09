@@ -30,7 +30,6 @@ from sqlalchemy import and_, delete, false, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from ..access_control.protocols import AccessTags
 from ..catalog.orm import AccessTag, Node, NodeAccessTag
 from ..queries import AccessTagsFilter
 from ..server.connection_pool import get_database_engine
@@ -312,11 +311,12 @@ class GraphSQLAlchemyStore:
         async with self._engine.connect() as conn:
             return await self._entity_record(conn, id)
 
-    async def get_node_access_tags(self, node_id: int) -> Optional[AccessTags]:
+    async def get_node_access_tags(self, node_id: int) -> Optional[frozenset[str]]:
         """
         Look up a catalog node's access tags, for resolving the effective
         access control of an entity that points to it (node_id is set).
-        Returns None if the node does not exist.
+        Returns None if the node does not exist. Returns raw stored tag
+        names; the caller converts to the policy-facing AccessTags type.
         """
         async with self._engine.connect() as conn:
             exists = (
@@ -335,7 +335,7 @@ class GraphSQLAlchemyStore:
                     .where(_node_access_tags.c.node_id == node_id)
                 )
             ).all()
-        return AccessTags(row.name for row in rows)
+        return frozenset(row.name for row in rows)
 
     async def list_entities(
         self,

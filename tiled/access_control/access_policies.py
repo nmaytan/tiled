@@ -516,7 +516,7 @@ class ExternalPolicyDecisionPoint(AccessPolicy, ABC):
         access_tags: Optional[AccessTags] = None,
     ) -> Tuple[bool, AccessTags]:
         if access_tags is None and self._empty_access_tags_public is not None:
-            return self._empty_access_tags_public, access_tags
+            return self._empty_access_tags_public, AccessTags()
         decision = await self._get_external_decision(
             self._create_node,
             self.build_input(principal, authn_access_tags, authn_scopes, access_tags),

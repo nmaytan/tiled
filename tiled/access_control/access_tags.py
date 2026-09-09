@@ -1,13 +1,14 @@
-import sqlite3
 import warnings
-from contextlib import closing
 from pathlib import Path
 from sys import intern
 
 import yaml
-from sqlalchemy import select
+from sqlalchemy import delete, func, insert, inspect, select, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_upsert
+from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from ..catalog import orm
+from ..graph import orm as graph_orm
 from ..server.connection_pool import get_database_engine
 from ..utils import InterningLoader
 
@@ -115,218 +116,278 @@ class AccessTagsParser:
         return user_scope_tags
 
 
-def create_access_tags_tables(db):
-    with closing(db.cursor()) as cursor:
-        tables_setup_sql = """
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA temp_store = MEMORY;
-PRAGMA foreign_keys = ON;
-BEGIN TRANSACTION;
-CREATE TABLE IF NOT EXISTS tags (
-  id        INTEGER PRIMARY KEY,
-  name      TEXT    UNIQUE NOT NULL,
-  is_public INTEGER NOT NULL DEFAULT 0
-    CHECK (is_public IN (0,1))
-);
-CREATE TABLE IF NOT EXISTS users (
-  id   INTEGER PRIMARY KEY,
-  name TEXT    UNIQUE NOT NULL
-);
-CREATE TABLE IF NOT EXISTS scopes (
-  id   INTEGER PRIMARY KEY,
-  name TEXT    UNIQUE NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tags_users_scopes (
-  tag_id    INTEGER NOT NULL
-    REFERENCES tags(id)
-    ON UPDATE CASCADE
-    ON DELETE CASCADE,
-  user_id   INTEGER NOT NULL
-    REFERENCES users(id)
-    ON UPDATE CASCADE
-    ON DELETE CASCADE,
-  scope_id  INTEGER NOT NULL
-    REFERENCES scopes(id)
-    ON UPDATE CASCADE
-    ON DELETE CASCADE,
-  PRIMARY KEY (tag_id, user_id, scope_id)
-);
-CREATE TABLE IF NOT EXISTS tag_owners (
-  tag_id   INTEGER NOT NULL
-    REFERENCES tags(id)
-    ON UPDATE CASCADE
-    ON DELETE CASCADE,
-  user_id  INTEGER NOT NULL
-    REFERENCES users(id)
-    ON UPDATE CASCADE
-    ON DELETE CASCADE,
-  PRIMARY KEY (tag_id, user_id)
-);
-CREATE INDEX IF NOT EXISTS idx_tags_is_public ON tags (is_public);
-CREATE INDEX IF NOT EXISTS idx_tus_users_scopes ON tags_users_scopes (user_id, scope_id);
-CREATE INDEX IF NOT EXISTS idx_tus_users_scopes_scopeid ON tags_users_scopes (scope_id);
-CREATE INDEX IF NOT EXISTS idx_tag_owners ON tag_owners (user_id);
-CREATE VIEW IF NOT EXISTS public_tags AS
-  SELECT name
-  FROM tags
-  WHERE is_public = 1;
-CREATE VIEW IF NOT EXISTS user_tag_scopes AS
-  SELECT
-    u.name AS user_name,
-    t.name AS tag_name,
-    s.name AS scope_name
-  FROM tags_users_scopes tus
-    JOIN users  u ON u.id = tus.user_id
-    JOIN tags   t ON t.id = tus.tag_id
-    JOIN scopes s ON s.id = tus.scope_id;
-CREATE VIEW IF NOT EXISTS user_tag_owners AS
-  SELECT
-    u.name AS user_name,
-    t.name AS tag_name
-  FROM tag_owners towner
-    JOIN users u ON u.id = towner.user_id
-    JOIN tags  t ON t.id = towner.tag_id;
-PRAGMA optimize;
-"""
-        cursor.executescript(tables_setup_sql)
-        db.commit()
+# The tables that the access tags compiler writes. They belong to the catalog
+# schema (normally created by catalog initialization and migrations), but the
+# compiler ensures they exist so that it can also run against a catalog
+# database that has not been initialized yet. The set is self-contained: no
+# foreign key in it references a table outside of it, and catalog
+# initialization tolerates their prior existence (create_all with checkfirst).
+ACCESS_TAGS_TABLES = [
+    orm.AccessTag.__table__,
+    orm.AccessTagsPrincipal.__table__,
+    orm.Scope.__table__,
+    orm.AccessTagPrincipalScope.__table__,
+    orm.AccessTagOwner.__table__,
+]
+
+# Association tables recording which tags are assigned to which data. Unlike
+# the grant junctions above, their contents are not derived from the compiled
+# tag definitions -- deleting a tag cascades to these rows, destroying state
+# that a later compile cannot restore. The compiler never writes these tables;
+# it only checks them before deleting a tag.
+ASSIGNMENT_TABLES = [
+    orm.NodeAccessTag.__table__,
+    graph_orm.entity_access_tags,
+    graph_orm.link_access_tags,
+]
+
+# PostgreSQL advisory lock key serializing concurrent compiles against the
+# same database (e.g. a scheduled sync overlapping a manual run). The value
+# is arbitrary but must be fixed and not collide with other advisory lock
+# users of the catalog database; tiled uses no other advisory locks.
+# 746 spells "tag" in digits.
+ACCESS_TAGS_COMPILER_LOCK_KEY = 746
 
 
-def update_access_tags_tables(db, scopes, tags, owners, public_tags):
-    with closing(db.cursor()) as cursor:
-        tables_stage_sql = """
-BEGIN TRANSACTION;
-CREATE TEMP TABLE IF NOT EXISTS stage_tags (
-  id        INTEGER,
-  name      TEXT    NOT NULL,
-  is_public INTEGER NOT NULL
-    CHECK (is_public IN (0,1))
-);
-CREATE TEMP TABLE IF NOT EXISTS stage_users (
-  id   INTEGER,
-  name TEXT NOT NULL
-);
-CREATE TEMP TABLE IF NOT EXISTS stage_scopes (
-  id   INTEGER,
-  name TEXT NOT NULL
-);
-CREATE TEMP TABLE IF NOT EXISTS stage_tags_users_scopes (
-  tag_id   INTEGER NOT NULL,
-  user_id  INTEGER NOT NULL,
-  scope_id INTEGER NOT NULL
-);
-CREATE TEMP TABLE IF NOT EXISTS stage_tag_owners (
-  tag_id  INTEGER NOT NULL,
-  user_id INTEGER NOT NULL
-);
-"""
-        cursor.executescript(tables_stage_sql)
+def _upsert(engine):
+    "Return the dialect-specific INSERT ... ON CONFLICT construct."
+    if engine.dialect.name == "postgresql":
+        return postgresql_upsert
+    return sqlite_upsert
 
-        # put all items into staging
-        all_tags = [(tag, 0) for tag in tags] + [(tag, 0) for tag in owners]
-        all_public = [(tag,) for tag in public_tags]
-        all_users = {(user,) for users in tags.values() for user in users}
-        all_users.update({(user,) for users in owners.values() for user in users})
-        all_scopes = [(scope,) for scope in scopes]
-        cursor.executemany(
-            "INSERT INTO stage_tags(name, is_public) VALUES (?,?);",
-            all_tags,
-        )
-        cursor.executemany(
-            "UPDATE stage_tags SET is_public = 1 WHERE name = (?);", all_public
-        )
-        cursor.executemany(
-            "INSERT INTO stage_users(name) VALUES (?);",
-            all_users,
-        )
-        cursor.executemany(
-            "INSERT INTO stage_scopes(name) VALUES (?);",
-            all_scopes,
+
+async def create_access_tags_tables(engine):
+    "Create the access tag tables and their indexes, if they do not exist."
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            orm.Base.metadata.create_all,
+            tables=ACCESS_TAGS_TABLES,
+            checkfirst=True,
         )
 
-        # push item names and metadata from staging to prod
-        # then pull back ID values from prod to staging
-        # note that UPSERT should always have a WHERE clause
-        #   to avoid ambiguity. See the SQLite docs section 2.2
-        #   https://www.sqlite.org/lang_upsert.html
-        stage_push_sql = """
-BEGIN TRANSACTION;
-INSERT INTO tags (name, is_public)
-  SELECT name, is_public
-  FROM stage_tags
-  WHERE true
-  ON CONFLICT (name)
-  DO UPDATE SET is_public = excluded.is_public;
-INSERT INTO users(name) SELECT name FROM stage_users WHERE true ON CONFLICT(name) DO NOTHING;
-INSERT INTO scopes(name) SELECT name FROM stage_scopes WHERE true ON CONFLICT(name) DO NOTHING;
-UPDATE stage_tags SET id = (SELECT id FROM tags WHERE tags.name = stage_tags.name);
-UPDATE stage_users SET id = (SELECT id FROM users WHERE users.name = stage_users.name);
-UPDATE stage_scopes SET id = (SELECT id FROM scopes WHERE scopes.name = stage_scopes.name);
-"""
-        cursor.executescript(stage_push_sql)
+
+async def update_access_tags_tables(engine, scopes, tags, owners, public_tags):
+    """
+    Synchronize the access tag tables with the compiled tag state.
+
+    Names are upserted, so existing rows -- and therefore their ids, which the
+    node_access_tags association table references -- are preserved across
+    recompilations. Definitions absent from the compiled state are deleted;
+    deleting a definition cascades to the rows that reference it, including
+    node_access_tags rows for a deleted tag. The whole update is a single
+    transaction.
+    """
+    upsert = _upsert(engine)
+    tags_table = orm.AccessTag.__table__
+    users_table = orm.AccessTagsPrincipal.__table__
+    scopes_table = orm.Scope.__table__
+    tags_users_scopes_table = orm.AccessTagPrincipalScope.__table__
+    tag_owners_table = orm.AccessTagOwner.__table__
+
+    # stage all items in memory, deduplicated
+    # (a name may appear in both tags and owners)
+    all_tags = {name: (name in public_tags) for name in (*tags, *owners)}
+    all_users = {user for users in tags.values() for user in users}
+    all_users.update(user for users in owners.values() for user in users)
+    all_scopes = set(scopes)
+
+    async with engine.begin() as connection:
+        if engine.dialect.name == "postgresql":
+            # Serialize concurrent compiles. Transaction-scoped: the lock is
+            # released automatically on commit or rollback, including when
+            # the session dies. SQLite needs no equivalent; its writers are
+            # serialized by database-level locking.
+            await connection.execute(
+                select(func.pg_advisory_xact_lock(ACCESS_TAGS_COMPILER_LOCK_KEY))
+            )
+
+        # push item names and metadata, preserving ids of existing names
+        tags_statement = upsert(tags_table).values(
+            [
+                {"name": name, "is_public": is_public}
+                for name, is_public in all_tags.items()
+            ]
+        )
+        await connection.execute(
+            tags_statement.on_conflict_do_update(
+                index_elements=["name"],
+                set_={"is_public": tags_statement.excluded.is_public},
+            )
+        )
+        if all_users:
+            await connection.execute(
+                upsert(users_table)
+                .values([{"name": name} for name in all_users])
+                .on_conflict_do_nothing(index_elements=["name"])
+            )
+        if all_scopes:
+            await connection.execute(
+                upsert(scopes_table)
+                .values([{"name": name} for name in all_scopes])
+                .on_conflict_do_nothing(index_elements=["name"])
+            )
+
+        # Among tags dropped from the compiled state, retain any that are
+        # still assigned to data: deleting them would cascade-destroy the
+        # assignments, which -- unlike the grants, which are re-derived from
+        # the compiled state on every run -- could not be restored by a later
+        # compile. A retained tag keeps its id and assignments but is
+        # stripped of all grants (its junction rows are pruned below) and
+        # made non-public, so it confers no access. If a later compile
+        # restores the name, the same row is reused and its grants resume;
+        # once nothing is assigned to it, the next compile deletes it.
+        stale_tags = {
+            name: tag_id
+            for tag_id, name in await connection.execute(
+                select(tags_table.c.id, tags_table.c.name).where(
+                    tags_table.c.name.not_in(list(all_tags))
+                )
+            )
+        }
+        retained_tag_ids = set()
+        if stale_tags:
+            stale_tag_ids = list(stale_tags.values())
+            # The assignment tables may not exist yet (e.g. compiling into a
+            # catalog database that has not been initialized); a table that
+            # does not exist holds no assignments.
+            existing_table_names = await connection.run_sync(
+                lambda sync_connection: set(inspect(sync_connection).get_table_names())
+            )
+            for assignment_table in ASSIGNMENT_TABLES:
+                if assignment_table.name not in existing_table_names:
+                    continue
+                retained_tag_ids.update(
+                    (
+                        await connection.execute(
+                            select(assignment_table.c.tag_id.distinct()).where(
+                                assignment_table.c.tag_id.in_(stale_tag_ids)
+                            )
+                        )
+                    ).scalars()
+                )
+        if retained_tag_ids:
+            retained_tag_names = sorted(
+                name
+                for name, tag_id in stale_tags.items()
+                if tag_id in retained_tag_ids
+            )
+            warnings.warn(
+                "These tags were dropped from the compiled tag definitions but "
+                "are still assigned to data, so instead of being deleted they "
+                f"are retained with all grants revoked: {retained_tag_names}",
+                UserWarning,
+            )
+            await connection.execute(
+                update(tags_table)
+                .where(tags_table.c.id.in_(list(retained_tag_ids)))
+                .values(is_public=False)
+            )
+
+        # delete outdated items; deletes cascade to the association tables
+        deleted_tag_ids = [
+            tag_id
+            for tag_id in stale_tags.values()
+            if tag_id not in retained_tag_ids
+        ]
+        if deleted_tag_ids:
+            await connection.execute(
+                delete(tags_table).where(tags_table.c.id.in_(deleted_tag_ids))
+            )
+        await connection.execute(
+            delete(users_table).where(users_table.c.name.not_in(list(all_users)))
+        )
+        await connection.execute(
+            delete(scopes_table).where(scopes_table.c.name.not_in(list(all_scopes)))
+        )
 
         # load db IDs for items into memory
-        cursor.execute("SELECT id, name FROM stage_tags")
-        tags_to_id = {intern(name): tag_id for (tag_id, name) in cursor.fetchall()}
-        cursor.execute("SELECT id, name FROM stage_users")
-        users_to_id = {intern(name): user_id for (user_id, name) in cursor.fetchall()}
-        cursor.execute("SELECT id, name FROM stage_scopes")
+        tags_to_id = {
+            intern(name): tag_id
+            for tag_id, name in await connection.execute(
+                select(tags_table.c.id, tags_table.c.name)
+            )
+        }
+        users_to_id = {
+            intern(name): user_id
+            for user_id, name in await connection.execute(
+                select(users_table.c.id, users_table.c.name)
+            )
+        }
         scopes_to_id = {
-            intern(name): scope_id for (scope_id, name) in cursor.fetchall()
+            intern(name): scope_id
+            for scope_id, name in await connection.execute(
+                select(scopes_table.c.id, scopes_table.c.name)
+            )
         }
 
-        # flatten relationships and push to staging
-        tags_users_scopes = [
+        # flatten relationships and diff against current table contents
+        tags_users_scopes = {
             (tags_to_id[tag], users_to_id[user], scopes_to_id[scope])
             for tag, users in tags.items()
-            for user, scopes in users.items()
-            for scope in scopes
-        ]
-        tag_owners = [
+            for user, user_scopes in users.items()
+            for scope in user_scopes
+        }
+        tag_owners = {
             (tags_to_id[tag], users_to_id[user])
             for tag, users in owners.items()
             for user in users
-        ]
-        cursor.executemany(
-            "INSERT INTO stage_tags_users_scopes(tag_id, user_id, scope_id) VALUES (?,?,?);",
-            tags_users_scopes,
-        )
-        cursor.executemany(
-            "INSERT INTO stage_tag_owners(tag_id, user_id) VALUES (?,?);", tag_owners
-        )
+        }
+        existing_tags_users_scopes = {
+            tuple(row)
+            for row in await connection.execute(
+                select(
+                    tags_users_scopes_table.c.tag_id,
+                    tags_users_scopes_table.c.principal_id,
+                    tags_users_scopes_table.c.scope_id,
+                )
+            )
+        }
+        existing_tag_owners = {
+            tuple(row)
+            for row in await connection.execute(
+                select(tag_owners_table.c.tag_id, tag_owners_table.c.principal_id)
+            )
+        }
 
-        # delete outdated tags from prod and add updated relationships to db
-        # finally, drop the staging tables
-        # to-do: consider refactoring this to indvidual execute statements
-        #        to avoid implicit pre-mature commit by executescript()
-        upsert_delete_sql = """
-BEGIN TRANSACTION;
-DELETE from tags WHERE id NOT in (SELECT id FROM stage_tags);
-DELETE from users WHERE id NOT in (SELECT id FROM stage_users);
-DELETE from scopes WHERE id NOT in (SELECT id FROM stage_scopes);
-INSERT INTO tags_users_scopes (tag_id, user_id, scope_id)
-  SELECT tag_id, user_id, scope_id FROM stage_tags_users_scopes
-  WHERE true
-  ON CONFLICT (tag_id, user_id, scope_id) DO NOTHING;
-DELETE FROM tags_users_scopes
-  WHERE (tag_id, user_id, scope_id)
-  NOT IN (SELECT tag_id, user_id, scope_id FROM stage_tags_users_scopes);
-INSERT INTO tag_owners (tag_id, user_id)
-  SELECT tag_id, user_id FROM stage_tag_owners
-  WHERE true
-  ON CONFLICT (tag_id, user_id) DO NOTHING;
-DELETE FROM tag_owners
-  WHERE (tag_id, user_id) NOT IN (SELECT tag_id, user_id FROM stage_tag_owners);
-DROP TABLE IF EXISTS stage_tags;
-DROP TABLE IF EXISTS stage_users;
-DROP TABLE IF EXISTS stage_scopes;
-DROP TABLE IF EXISTS stage_tags_users_scopes;
-DROP TABLE IF EXISTS stage_tag_owners;
-PRAGMA optimize;
-"""
-        cursor.executescript(upsert_delete_sql)
-        db.commit()
+        # add updated relationships and delete outdated ones
+        new_tags_users_scopes = tags_users_scopes - existing_tags_users_scopes
+        if new_tags_users_scopes:
+            await connection.execute(
+                insert(tags_users_scopes_table),
+                [
+                    {"tag_id": tag_id, "principal_id": user_id, "scope_id": scope_id}
+                    for tag_id, user_id, scope_id in new_tags_users_scopes
+                ],
+            )
+        stale_tags_users_scopes = existing_tags_users_scopes - tags_users_scopes
+        if stale_tags_users_scopes:
+            await connection.execute(
+                delete(tags_users_scopes_table).where(
+                    tuple_(
+                        tags_users_scopes_table.c.tag_id,
+                        tags_users_scopes_table.c.principal_id,
+                        tags_users_scopes_table.c.scope_id,
+                    ).in_(list(stale_tags_users_scopes))
+                )
+            )
+        new_tag_owners = tag_owners - existing_tag_owners
+        if new_tag_owners:
+            await connection.execute(
+                insert(tag_owners_table),
+                [
+                    {"tag_id": tag_id, "principal_id": user_id}
+                    for tag_id, user_id in new_tag_owners
+                ],
+            )
+        stale_tag_owners = existing_tag_owners - tag_owners
+        if stale_tag_owners:
+            await connection.execute(
+                delete(tag_owners_table).where(
+                    tuple_(
+                        tag_owners_table.c.tag_id, tag_owners_table.c.principal_id
+                    ).in_(list(stale_tag_owners))
+                )
+            )
 
 
 class AccessTagsCompiler:
@@ -336,14 +397,16 @@ class AccessTagsCompiler:
         self,
         scopes,
         tag_config,
-        tags_db,
+        database_settings,
         group_parser,
     ):
         self.scopes = scopes or {}
         self.tag_config = tag_config
-        self.connection = sqlite3.connect(
-            tags_db["uri"], uri=True, check_same_thread=False
-        )
+        # Reuse the pooled engine keyed by these settings; when the compiler
+        # runs inside a tiled server, the pool is shared with the catalog
+        # adapter connected to the same database.
+        self._engine = get_database_engine(database_settings)
+        self._tables_created = False
         self.group_parser = group_parser
 
         self.max_tag_nesting = max(self._MAX_TAG_NESTING, 0)
@@ -356,8 +419,6 @@ class AccessTagsCompiler:
         self.compiled_tags = {self.public_tag: {}}
         self.compiled_public = set({self.public_tag})
         self.compiled_tag_owners = {}
-
-        create_access_tags_tables(self.connection)
 
     def load_tag_config(self):
         if isinstance(self.tag_config, str) or isinstance(self.tag_config, Path):
@@ -477,7 +538,11 @@ class AccessTagsCompiler:
         self.compiled_tags[current_tag] = users
         return users, public_auto_tag
 
-    def compile(self):
+    async def compile(self):
+        if not self._tables_created:
+            await create_access_tags_tables(self._engine)
+            self._tables_created = True
+
         for role in self.roles.values():
             if "scopes" not in role:
                 raise ValueError(f"Scopes must be defined for a role. {role=}")
@@ -540,8 +605,8 @@ class AccessTagsCompiler:
                             username = intern(username)
                             self.compiled_tag_owners[tag].add(username)
 
-        update_access_tags_tables(
-            self.connection,
+        await update_access_tags_tables(
+            self._engine,
             self.scopes,
             self.compiled_tags,
             self.compiled_tag_owners,
@@ -553,8 +618,8 @@ class AccessTagsCompiler:
         self.tags = {}
         self.tag_owners = {}
 
-    def recompile(self):
+    async def recompile(self):
         self.compiled_tags = {self.public_tag: {}}
         self.compiled_public = set({self.public_tag})
         self.compiled_tag_owners = {}
-        self.compile()
+        await self.compile()

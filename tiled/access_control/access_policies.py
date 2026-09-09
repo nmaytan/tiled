@@ -190,14 +190,16 @@ class TagBasedAccessPolicy(AccessPolicy):
         else:
             if (
                 authn_access_tags is not None
-                and f"{principal.type}:{identifier}" not in authn_access_tags
+                and f"{principal.type.value}:{identifier}" not in authn_access_tags
             ):
                 raise ValueError(
                     f"Cannot init node as user-tagged node.\n"
                     f"Current API key does not permit action on user-owned nodes.\n"
                     f"Please provide only tags allowed by this API key: {authn_access_tags}"
                 )
-            access_tags_from_policy = AccessTags([f"{principal.type}:{identifier}"])
+            access_tags_from_policy = AccessTags(
+                [f"{principal.type.value}:{identifier}"]
+            )
             access_tags_modified = True
 
         logger.info(

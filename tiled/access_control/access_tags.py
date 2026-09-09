@@ -4,90 +4,114 @@ from contextlib import closing
 from pathlib import Path
 from sys import intern
 
-import aiosqlite
 import yaml
+from sqlalchemy import select
 
-from ..utils import InterningLoader, ensure_specified_sql_driver
+from ..catalog import orm
+from ..server.connection_pool import get_database_engine
+from ..utils import InterningLoader
+
+# The access_tag_principal_scopes junction table, joined to the tables its
+# three foreign keys reference so that it can be queried by name. Shared by
+# the lookups in both directions: (tag, principal) -> scopes and
+# (principal, scope) -> tags.
+access_tag_principal_scopes_named = (
+    orm.AccessTagPrincipalScope.__table__.join(
+        orm.AccessTag.__table__,
+        orm.AccessTag.id == orm.AccessTagPrincipalScope.tag_id,
+    )
+    .join(
+        orm.AccessTagsPrincipal.__table__,
+        orm.AccessTagsPrincipal.id == orm.AccessTagPrincipalScope.principal_id,
+    )
+    .join(
+        orm.Scope.__table__,
+        orm.Scope.id == orm.AccessTagPrincipalScope.scope_id,
+    )
+)
 
 
 class AccessTagsParser:
-    @classmethod
-    def from_uri(cls, uri):
-        if uri.startswith("file:"):
-            uri = uri.split(":", 1)[1]
-        uri = ensure_specified_sql_driver(uri)
-        if not uri.startswith("sqlite+aiosqlite:"):
-            raise ValueError(
-                f"AccessTagsParser must be given a SQLite database URI, "
-                f"i.e. 'sqlite:///...', 'sqlite+aiosqlite:///...'\n"
-                f"Given URI results in: {uri=}"
-            )
-        uri_path = uri.split(":", 1)[1]
-        if not uri_path.startswith("///"):
-            raise ValueError(
-                "Invalid URI provided, URI must contain 3 forward slashes, "
-                "e.g. 'sqlite:///...'."
-            )
-        uri = f"file:{uri_path[3:]}"
-        uri = uri if "?" in uri else f"{uri}?mode=ro"
-        return cls(uri=uri)
+    """
+    Read access tag definitions from the catalog database.
 
-    def __init__(self, db=None, uri=None):
-        self._uri = uri
-        self._db = db
+    Serves the lookups that TagBasedAccessPolicy needs. Tag definitions live
+    in the catalog database (written there by the access tags compiler), so
+    the parser connects with the catalog's own database settings -- there is
+    no separate tag database to configure. Queries are SQLAlchemy Core
+    statements and run on any supported dialect (SQLite and PostgreSQL).
+    """
 
-    async def connect(self):
-        if self._db is None:
-            self._db = await aiosqlite.connect(
-                self._uri, uri=True, check_same_thread=False
-            )
+    def __init__(self, engine=None):
+        self._engine = engine
+
+    async def connect(self, database_settings):
+        if self._engine is None:
+            # Reuse the pooled engine keyed by these settings; the pool is
+            # shared with the catalog adapter connected to the same database.
+            self._engine = get_database_engine(database_settings)
 
     async def is_tag_defined(self, name):
-        async with self._db.cursor() as cursor:
-            await cursor.execute("SELECT 1 FROM tags WHERE name = ?;", (name,))
-            row = await cursor.fetchone()
-            found_tagname = bool(row)
+        statement = select(orm.AccessTag.id).where(orm.AccessTag.name == name)
+        async with self._engine.connect() as conn:
+            found_tagname = (await conn.execute(statement)).first() is not None
         return found_tagname
 
     async def get_public_tags(self):
-        async with self._db.cursor() as cursor:
-            await cursor.execute("SELECT name FROM public_tags;")
-            public_tags = {name for (name,) in await cursor.fetchall()}
+        statement = select(orm.AccessTag.name).where(orm.AccessTag.is_public)
+        async with self._engine.connect() as conn:
+            public_tags = set((await conn.execute(statement)).scalars())
         return public_tags
 
     async def get_scopes_from_tag(self, tagname, username):
-        async with self._db.cursor() as cursor:
-            await cursor.execute(
-                "SELECT scope_name FROM user_tag_scopes WHERE tag_name = ? AND user_name = ?;",
-                (tagname, username),
+        statement = (
+            select(orm.Scope.name)
+            .select_from(access_tag_principal_scopes_named)
+            .where(
+                orm.AccessTag.name == tagname,
+                orm.AccessTagsPrincipal.name == username,
             )
-            user_tag_scopes = {scope for (scope,) in await cursor.fetchall()}
+        )
+        async with self._engine.connect() as conn:
+            user_tag_scopes = set((await conn.execute(statement)).scalars())
         return user_tag_scopes
 
     async def is_tag_owner(self, tagname, username):
-        async with self._db.cursor() as cursor:
-            await cursor.execute(
-                "SELECT 1 FROM user_tag_owners WHERE tag_name = ? AND user_name = ?;",
-                (tagname, username),
+        statement = (
+            select(orm.AccessTagOwner.tag_id)
+            .join(orm.AccessTag, orm.AccessTag.id == orm.AccessTagOwner.tag_id)
+            .join(
+                orm.AccessTagsPrincipal,
+                orm.AccessTagsPrincipal.id == orm.AccessTagOwner.principal_id,
             )
-            row = await cursor.fetchone()
-            found_owner = bool(row)
+            .where(
+                orm.AccessTag.name == tagname,
+                orm.AccessTagsPrincipal.name == username,
+            )
+        )
+        async with self._engine.connect() as conn:
+            found_owner = (await conn.execute(statement)).first() is not None
         return found_owner
 
     async def is_tag_public(self, name):
-        async with self._db.cursor() as cursor:
-            await cursor.execute("SELECT 1 FROM public_tags WHERE name = ?;", (name,))
-            row = await cursor.fetchone()
-            found_public = bool(row)
+        statement = select(orm.AccessTag.id).where(
+            orm.AccessTag.name == name, orm.AccessTag.is_public
+        )
+        async with self._engine.connect() as conn:
+            found_public = (await conn.execute(statement)).first() is not None
         return found_public
 
     async def get_tags_from_scope(self, scope, username):
-        async with self._db.cursor() as cursor:
-            await cursor.execute(
-                "SELECT tag_name FROM user_tag_scopes WHERE user_name = ? AND scope_name = ?;",
-                (username, scope),
+        statement = (
+            select(orm.AccessTag.name)
+            .select_from(access_tag_principal_scopes_named)
+            .where(
+                orm.Scope.name == scope,
+                orm.AccessTagsPrincipal.name == username,
             )
-            user_scope_tags = {tag for (tag,) in await cursor.fetchall()}
+        )
+        async with self._engine.connect() as conn:
+            user_scope_tags = set((await conn.execute(statement)).scalars())
         return user_scope_tags
 
 

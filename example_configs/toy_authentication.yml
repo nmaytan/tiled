@@ -25,8 +25,7 @@ access_control:
     - "delete:node"
     - "create:node"
     - "register"
-    tags_db:
-      uri: "file:example_configs/access_tags/compiled_tags.sqlite"
+    # Access tag definitions are read from the catalog database (see trees).
     access_tags_parser: "tiled.access_control.access_tags:AccessTagsParser"
 trees:
   - path: /

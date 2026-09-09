@@ -65,14 +65,10 @@ OWNERS = (
 def _create_tag_tables():
     """Create the tag tables and indexes, mirroring tiled.catalog.orm and
     tiled.graph.orm exactly."""
+    # Column order matters for parity with create_all: the Timestamped mixin
+    # columns come last in the ORM-rendered DDL.
     op.create_table(
         "access_tags",
-        sa.Column("time_created", sa.DateTime(), server_default=sa.func.now()),
-        sa.Column(
-            "time_updated",
-            sa.DateTime(),
-            server_default=sa.func.now(),
-        ),
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("name", sa.Unicode(255), nullable=False, unique=True),
         sa.Column(
@@ -81,6 +77,8 @@ def _create_tag_tables():
             nullable=False,
             server_default=sa.text("false"),
         ),
+        sa.Column("time_created", sa.DateTime(), server_default=sa.func.now()),
+        sa.Column("time_updated", sa.DateTime(), server_default=sa.func.now()),
     )
     # Partial + covering, matching the ORM: index-only scan for
     # "SELECT name WHERE is_public", zero maintenance for non-public rows.
@@ -172,10 +170,10 @@ def _create_tag_tables():
     # first time by the access tags compiler, never by this migration.
     op.create_table(
         "access_tags_principals",
-        sa.Column("time_created", sa.DateTime(), server_default=sa.func.now()),
-        sa.Column("time_updated", sa.DateTime(), server_default=sa.func.now()),
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("name", sa.Unicode(255), nullable=False, unique=True),
+        sa.Column("time_created", sa.DateTime(), server_default=sa.func.now()),
+        sa.Column("time_updated", sa.DateTime(), server_default=sa.func.now()),
     )
     op.create_table(
         "scopes",

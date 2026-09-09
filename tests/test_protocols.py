@@ -31,7 +31,8 @@ from tiled.structures.core import Spec, StructureFamily
 from tiled.structures.ragged import RaggedStructure
 from tiled.structures.sparse import COOStructure
 from tiled.structures.table import TableStructure
-from tiled.type_aliases import JSON, AccessBlob, AccessTags, Filters, Scopes
+from tiled.access_control.protocols import AccessTags
+from tiled.type_aliases import JSON, Filters, Scopes
 
 
 class CustomArrayAdapter:
@@ -492,9 +493,9 @@ class CustomAccessPolicy(AccessPolicy):
         principal: Principal,
         authn_access_tags: Optional[AccessTags],
         authn_scopes: Scopes,
-        access_blob: Optional[AccessBlob] = None,
-    ) -> Tuple[bool, AccessBlob]:
-        return (False, access_blob or AccessBlob(tags=[]))
+        access_tags: Optional[AccessTags] = None,
+    ) -> Tuple[bool, AccessTags]:
+        return (False, access_tags or AccessTags())
 
     async def modify_node(
         self,
@@ -502,9 +503,9 @@ class CustomAccessPolicy(AccessPolicy):
         principal: Principal,
         authn_access_tags: Optional[AccessTags],
         authn_scopes: Scopes,
-        access_blob: Optional[AccessBlob],
-    ) -> Tuple[bool, AccessBlob]:
-        return (False, access_blob or AccessBlob(tags=[]))
+        access_tags: Optional[AccessTags],
+    ) -> Tuple[bool, AccessTags]:
+        return (False, access_tags or AccessTags())
 
     async def allowed_scopes(
         self,

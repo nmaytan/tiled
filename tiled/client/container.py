@@ -701,7 +701,6 @@ class Container(BaseClient, collections.abc.Mapping, IndexersMixin):
 
         self._cached_len = None
         metadata = metadata or {}
-        access_tags = access_tags or []
 
         # Backompatibility: if the server is older than 0.2.4,
         # it can not accept the "properties" field in the data source.

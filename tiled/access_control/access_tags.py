@@ -64,6 +64,12 @@ class AccessTagsParser:
             public_tags = set((await conn.execute(statement)).scalars())
         return public_tags
 
+    async def get_defined_scopes(self):
+        statement = select(orm.Scope.name)
+        async with self._engine.connect() as conn:
+            defined_scopes = set((await conn.execute(statement)).scalars())
+        return defined_scopes
+
     async def get_scopes_from_tag(self, tagname, username):
         statement = (
             select(orm.Scope.name)

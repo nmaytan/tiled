@@ -323,7 +323,9 @@ async def update_access_tags_tables(engine, scopes, tags, owners, public_tags):
             )
         }
         scopes_to_id = {
-            intern(name): scope_id
+            # name is a ScopeName enum member; key by its interned string
+            # value (not str(member), which is e.g. "ScopeName.read_data")
+            intern(name.value): scope_id
             for scope_id, name in await connection.execute(
                 select(scopes_table.c.id, scopes_table.c.name)
             )

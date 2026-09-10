@@ -308,6 +308,9 @@ class TagBasedAccessPolicy(AccessPolicy):
                         f"Cannot remove tag from node: "
                         f"API key is restricted to access tags: {authn_access_tags}."
                     )
+            if tag in self._get_principal_tag(principal.type, identifier):
+                # A principal intrinsically owns its own principal tag
+                continue
             if tag == self.public_tag:
                 if not self._is_admin(authn_scopes):
                     raise ValueError(

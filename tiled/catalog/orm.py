@@ -22,6 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.schema import PrimaryKeyConstraint, UniqueConstraint
 from sqlalchemy.sql import func
 
+from ..access_control.scopes import ScopeName
 from ..server.schemas import Management
 from ..structures.core import StructureFamily
 from .base import Base
@@ -252,15 +253,22 @@ class Scope(Base):
     """
     A named permission scope (e.g. 'read:data', 'write:data', 'create:node').
 
-    The set of valid scopes is defined by the server configuration.  A Scope
-    row is created the first time a scope name appears in a tag definition so
-    that AccessTagPrincipalScope can reference it by ID.
+    The set of valid scope names is the closed ScopeName enum. A Scope row is
+    created the first time a scope name appears in a tag definition.
     """
 
     __tablename__ = "scopes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(Unicode(255), nullable=False, unique=True)
+    name = Column(
+        Enum(
+            ScopeName,
+            name="scope_name",
+            values_callable=lambda enum: [member.value for member in enum],
+        ),
+        nullable=False,
+        unique=True,
+    )
 
     principal_tags: Mapped[List["AccessTagPrincipalScope"]] = relationship(
         back_populates="scope",

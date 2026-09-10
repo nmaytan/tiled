@@ -44,6 +44,30 @@ down_revision = "de302a096358"
 branch_labels = None
 depends_on = None
 
+# The scopes.name column is a native enum (scope_name on PostgreSQL). The
+# values are frozen here at this revision's authorship; the live set of valid
+# scopes is the ScopeName enum in tiled.access_control.scopes, but migrations
+# must not import application code that may change out from under them.
+SCOPE_NAME_ENUM = sa.Enum(
+    "read:metadata",
+    "read:data",
+    "write:metadata",
+    "write:data",
+    "delete:revision",
+    "delete:node",
+    "create:node",
+    "register",
+    "metrics",
+    "create:apikeys",
+    "revoke:apikeys",
+    "admin:apikeys",
+    "read:principals",
+    "write:principals",
+    "read:webhooks",
+    "write:webhooks",
+    name="scope_name",
+)
+
 ENTITY_NODE_ACCESS_TAGS_ERROR = (
     "An entity with node_id set must not have its own access tags; "
     "access is controlled by the referenced node."
@@ -178,7 +202,7 @@ def _create_tag_tables():
     op.create_table(
         "scopes",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("name", sa.Unicode(255), nullable=False, unique=True),
+        sa.Column("name", SCOPE_NAME_ENUM, nullable=False, unique=True),
     )
     op.create_table(
         "access_tag_principal_scopes",
@@ -968,3 +992,5 @@ def downgrade():
     _create_blob_triggers(connection)
 
     _drop_tag_tables()
+    if dialect_name == "postgresql":
+        op.execute("DROP TYPE IF EXISTS scope_name")

@@ -12,6 +12,14 @@ authentication:
   tiled_admins:
     - provider: toy
       id: admin
+database:
+  # The authentication database, where the server records principals
+  # (users and services) as they first log in. The access tags compiler
+  # (example_configs/access_tags/compile_tags.py) reads it to generate a
+  # principal tag ('user:alice', ...) for each principal, which is what
+  # lets a principal create nodes without explicit access tags.
+  uri: "sqlite:///./example_configs/authn.db"
+  init_if_not_exists: true
 access_control:
   access_policy: "tiled.access_control.access_policies:TagBasedAccessPolicy"
   args:

@@ -43,16 +43,34 @@ async def main():
     catalog_database = file_directory.parent / "catalog" / "catalog.db"
     database_settings = DatabaseSettings(uri=f"sqlite+aiosqlite:///{catalog_database}")
 
+    # The compiler also reads the authentication database (the 'database'
+    # section of toy_authentication.yml) to generate a principal tag
+    # ('user:alice', ...) for every principal that has logged in, granting
+    # each principal scopes on their own data. The provider must match the
+    # access policy's. The server creates this database at first startup; on
+    # the very first compilation, before it exists, the compiler warns and
+    # skips principal tags -- they appear on the next compilation, so
+    # principals can only create nodes without explicit access tags after
+    # a compilation that ran after their first login.
+    authn_database = file_directory.parent / "authn.db"
+    authn_database_settings = DatabaseSettings(
+        uri=f"sqlite+aiosqlite:///{authn_database}"
+    )
+
     access_tags_compiler = AccessTagsCompiler(
         SCOPES,
         Path(file_directory, "tag_definitions.yml"),
         database_settings,
         group_parser,
+        authn_database_settings=authn_database_settings,
+        provider="toy",
     )
 
     access_tags_compiler.load_tag_config()
+    await access_tags_compiler.load_principal_tags()
     await access_tags_compiler.compile()
     await close_database_connection_pool(database_settings)
+    await close_database_connection_pool(authn_database_settings)
 
 
 if __name__ == "__main__":

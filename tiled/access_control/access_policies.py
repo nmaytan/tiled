@@ -106,6 +106,15 @@ class TagBasedAccessPolicy(AccessPolicy):
             return True
         return False
 
+    def _get_principal_tag(self, principal_type, identifier):
+        """
+        The principal-tag literal(s) that refer to this principal.
+        """
+        principal_tag = {f"user:{identifier}"}
+        if principal_type == "service":
+            principal_tag.add(f"service:{identifier}")
+        return principal_tag
+
     async def init_node(
         self,
         principal: Principal,
@@ -366,11 +375,20 @@ class TagBasedAccessPolicy(AccessPolicy):
             else:
                 identifier = self._get_id(principal)
 
+            principal_tag = (
+                self._get_principal_tag(principal.type, identifier)
+                if identifier is not None
+                else set()
+            )
+
             allowed = set()
             for tag in node.access_tags:
                 if authn_access_tags is not None:
                     if tag not in authn_access_tags:
                         continue
+                if tag in principal_tag:
+                    # Intrinsic self-grant from principal's own tag
+                    allowed.update(set(authn_scopes) & set(self.scopes))
                 if await self.is_tag_public(tag):
                     allowed.update(self.read_scopes)
                     if tag == self.public_tag:
@@ -416,6 +434,10 @@ class TagBasedAccessPolicy(AccessPolicy):
                     ]
                 )
             )
+            # Intrinsic self-grant from principal's own tag
+            # Principal's tag qualifies if it covers every requested scope
+            if scopes.issubset(set(authn_scopes) & set(self.scopes)):
+                tag_list.update(self._get_principal_tag(principal.type, identifier))
 
         tag_list.update(
             set.intersection(

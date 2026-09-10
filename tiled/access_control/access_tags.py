@@ -7,10 +7,13 @@ from sqlalchemy import delete, func, insert, inspect, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_upsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
+from ..authn_database import orm as authn_orm
 from ..catalog import orm
 from ..graph import orm as graph_orm
 from ..server.connection_pool import get_database_engine
+from ..server.schemas import PrincipalType
 from ..utils import InterningLoader
+from .protocols import PRINCIPAL_TAG_PREFIXES
 
 # The access_tag_principal_scopes junction table, joined to the tables its
 # three foreign keys reference so that it can be queried by name. Shared by
@@ -405,6 +408,9 @@ class AccessTagsCompiler:
         tag_config,
         database_settings,
         group_parser,
+        *,
+        authn_database_settings=None,
+        provider=None,
     ):
         self.scopes = scopes or {}
         self.tag_config = tag_config
@@ -414,6 +420,21 @@ class AccessTagsCompiler:
         self._engine = get_database_engine(database_settings)
         self._tables_created = False
         self.group_parser = group_parser
+        # Optionally, load_principal_tags() reads principals from the
+        # authentication database and defines a principal tag ('user:...'
+        # or 'service:...') for each
+        if (authn_database_settings is None) != (provider is None):
+            raise ValueError(
+                "authn_database_settings and provider must be given together: "
+                "principal tags are generated from the identities associated "
+                "with the given provider."
+            )
+        self._authn_engine = (
+            get_database_engine(authn_database_settings)
+            if authn_database_settings is not None
+            else None
+        )
+        self.provider = provider
 
         self.max_tag_nesting = max(self._MAX_TAG_NESTING, 0)
         self.public_tag = intern("public".casefold())
@@ -544,6 +565,135 @@ class AccessTagsCompiler:
         self.compiled_tags[current_tag] = users
         return users, public_auto_tag
 
+    async def load_principal_tags(self):
+        """
+        Load a principal tag definition for every principal in the
+        authentication database.
+
+        User principals are identified by their identity id from the
+        configured provider (tag 'user:<id>'); service principals by their
+        uuid (tags 'service:<uuid>' and 'user:<uuid>', since either literal
+        may be used to refer to them).
+
+        If the authentication database is missing, uninitialized, or
+        unreachable, warn and load nothing; the compilation proceeds with
+        the config-defined tags.
+        """
+        if self._authn_engine is None:
+            raise RuntimeError(
+                "Principal tags cannot be loaded: the compiler was "
+                "constructed without authn_database_settings and provider."
+            )
+
+        # Connecting to a nonexistent SQLite database would create it as an
+        # empty file, which the server then refuses to initialize at startup.
+        # The compiler must only ever read this database, so check for the
+        # file first instead of connecting.
+        url = self._authn_engine.url
+        if url.get_backend_name() == "sqlite":
+            database = url.database
+            if (
+                database
+                and database != ":memory:"
+                and "mode=memory" not in database
+                and not Path(database).exists()
+            ):
+                warnings.warn(
+                    "The authentication database is not initialized yet; "
+                    "no principal tags were generated.",
+                    UserWarning,
+                )
+                return
+
+        association = authn_orm.principal_role_association_table
+        principals_with_roles = authn_orm.Principal.__table__.join(
+            association, association.c.principal_id == authn_orm.Principal.id
+        )
+        try:
+            async with self._authn_engine.connect() as conn:
+                if not await conn.run_sync(
+                    lambda sync_conn: inspect(sync_conn).has_table(
+                        authn_orm.Principal.__tablename__
+                    )
+                ):
+                    warnings.warn(
+                        "The authentication database is not initialized yet; "
+                        "no principal tags were generated.",
+                        UserWarning,
+                    )
+                    return
+                # Read the roles once; the scopes granted through a role are
+                # the intersection of the role's scopes with the compiler's.
+                granted_scopes_of_role = {
+                    role_id: set(role_scopes) & set(self.scopes)
+                    for role_id, role_scopes in await conn.execute(
+                        select(authn_orm.Role.id, authn_orm.Role.scopes)
+                    )
+                }
+                user_rows = list(
+                    await conn.execute(
+                        select(authn_orm.Identity.id, association.c.role_id)
+                        .select_from(
+                            principals_with_roles.join(
+                                authn_orm.Identity,
+                                authn_orm.Identity.principal_id
+                                == authn_orm.Principal.id,
+                            )
+                        )
+                        .where(
+                            authn_orm.Principal.type == PrincipalType.user,
+                            authn_orm.Identity.provider == self.provider,
+                        )
+                    )
+                )
+                service_rows = list(
+                    await conn.execute(
+                        select(authn_orm.Principal.uuid, association.c.role_id)
+                        .select_from(principals_with_roles)
+                        .where(authn_orm.Principal.type == PrincipalType.service)
+                    )
+                )
+        except Exception as exc:
+            # Not just DBAPIError: connection failures from the async drivers
+            # (e.g. asyncpg) can propagate unwrapped, and no failure to read
+            # the authentication database should abort the compilation.
+            warnings.warn(
+                f"The authentication database could not be read "
+                f"({exc.__class__.__name__}: {exc}); no principal tags were "
+                f"generated. Compilation proceeds with the config-defined "
+                f"tags only. Previously generated principal tags will be "
+                f"treated as stale until a compilation can read the "
+                f"authentication database again.",
+                UserWarning,
+            )
+            return
+
+        # A principal may hold several roles (several rows); union the scopes
+        # its roles grant. A user is named by its provider identity id, a
+        # service by its uuid; a service may be referred to by either literal.
+        tag_scopes = {}
+        for identifier, role_id in user_rows:
+            tag_scopes.setdefault(f"user:{identifier}", set()).update(
+                granted_scopes_of_role[role_id]
+            )
+        for identifier, role_id in service_rows:
+            granted = granted_scopes_of_role[role_id]
+            tag_scopes.setdefault(f"service:{identifier}", set()).update(granted)
+            tag_scopes.setdefault(f"user:{identifier}", set()).update(granted)
+
+        for tag_name, granted_scopes in tag_scopes.items():
+            # Merge with (do not overwrite) a definition that the tag config
+            # may provide for this tag; compilation unions the grants. A
+            # principal whose roles grant nothing gets a definition with no
+            # 'users' entry: _dfs rejects a user entry with empty scopes, and
+            # an empty definition compiles to an empty grant set.
+            identifier = tag_name.partition(":")[2]
+            definition = self.tags.setdefault(intern(tag_name), {})
+            if granted_scopes:
+                definition.setdefault("users", []).append(
+                    {"name": identifier, "scopes": granted_scopes}
+                )
+
     async def compile(self):
         if not self._tables_created:
             await create_access_tags_tables(self._engine)
@@ -558,6 +708,15 @@ class AccessTagsCompiler:
                 raise ValueError(
                     f"Scopes for {role=} are not in the valid set of scopes. The invalid scopes are:"
                     f'{set(role["scopes"]).difference(self.scopes)}'
+                )
+
+        for tag in self.tag_owners:
+            if tag.casefold().startswith(PRINCIPAL_TAG_PREFIXES):
+                raise ValueError(
+                    f"Tag '{tag}' uses a principal-tag prefix "
+                    f"{PRINCIPAL_TAG_PREFIXES}.\n"
+                    f"Principal tags cannot have owners: they are never "
+                    f"applied to nodes manually, only by the access policy."
                 )
 
         adjacent_tags = {}

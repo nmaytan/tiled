@@ -30,6 +30,7 @@ from sqlalchemy import and_, delete, false, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from ..catalog.core import register_principal_tag_rows
 from ..catalog.orm import AccessTag, Node, NodeAccessTag
 from ..queries import AccessTagsFilter
 from ..server.connection_pool import get_database_engine
@@ -146,10 +147,14 @@ async def _resolve_tag_ids(conn, tag_names: Iterable[str]) -> list[int]:
     tag that has no row, so unknown names raise. Normally the access policy
     has already validated the tags; this fires only for requests that
     bypassed the policy or raced a tag-definition resync.
+
+    Principal tags are slightly different: these need to exist at write,
+    possibly before the tags compiler has been able to create them.
     """
     names = set(tag_names)
     if not names:
         return []
+    await register_principal_tag_rows(conn, names)
     rows = (
         await conn.execute(
             select(_access_tags.c.id, _access_tags.c.name).where(

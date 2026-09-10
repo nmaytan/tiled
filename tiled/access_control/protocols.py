@@ -6,6 +6,11 @@ from ..server.schemas import Principal
 from ..type_aliases import Filters, Scopes
 
 
+# Prefixes of principal tags ('user:<id>', 'service:<uuid>'), which mark
+# nodes as owned by a single principal.
+PRINCIPAL_TAG_PREFIXES = ("user:", "service:")
+
+
 class AccessTags(frozenset[str]):
     def __new__(cls, tags=()):
         if isinstance(tags, str):

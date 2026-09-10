@@ -51,8 +51,9 @@ async def initialize_database(engine: AsyncEngine):
         # tag-based access control, a node with no tags is inaccessible, and
         # the root must never block traversal to its children. The
         # association requires the 'public' tag row to exist (foreign key),
-        # so it is created here if missing. This is the only place outside of
-        # the access tags compiler that inserts an access tag.
+        # so it is created here if missing. Besides the access tags compiler,
+        # tag rows are inserted only here and by the storage layers'
+        # auto-registration of principal tags (register_principal_tag_rows).
         # On a server without an access policy, tags are ignored and
         # these rows are inert.
         public_tag_id = await connection.scalar(
@@ -79,6 +80,38 @@ async def initialize_database(engine: AsyncEngine):
             # https://www.sqlite.org/wal.html
             await connection.execute(text("PRAGMA journal_mode=WAL;"))
         await connection.commit()
+
+
+async def register_principal_tag_rows(connection, tag_names):
+    """
+    Auto-register bare access tag rows for any principal tags in tag_names.
+    Principal tags need to exist at write, possibly before the tags compiler
+    has been able to create them.
+
+    Call this on the same connection/transaction as the tag assignment, so
+    that the row is never observed unassigned and the compiler's retention
+    rules will never delete it. (An AsyncSession caller can pass
+    `await session.connection()`.)
+    """
+    from ..access_control.protocols import PRINCIPAL_TAG_PREFIXES
+    from . import orm
+
+    principal_tags = {
+        name for name in tag_names if name.startswith(PRINCIPAL_TAG_PREFIXES)
+    }
+    if not principal_tags:
+        return
+    if connection.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as upsert
+    else:
+        from sqlalchemy.dialects.sqlite import insert as upsert
+    await connection.execute(
+        upsert(orm.AccessTag.__table__)
+        .values(
+            [{"name": name, "is_public": False} for name in sorted(principal_tags)]
+        )
+        .on_conflict_do_nothing(index_elements=["name"])
+    )
 
 
 async def check_catalog_database(engine: AsyncEngine):

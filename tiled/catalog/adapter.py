@@ -125,7 +125,11 @@ from ..utils import (
     path_from_uri,
 )
 from . import orm
-from .core import check_catalog_database, initialize_database
+from .core import (
+    check_catalog_database,
+    initialize_database,
+    register_principal_tag_rows,
+)
 from .explain import ExplainAsyncSession
 from .utils import compute_structure_id
 
@@ -217,7 +221,11 @@ async def _resolve_access_tags(db, tag_names):
     validated the tags; this fires only for requests that bypassed the
     policy or raced a tag-definition resync, and it uses the same status
     code that the policy check produces (403).
+
+    Principal tags are slightly different: these need to exist at write,
+    possibly before the tags compiler has been able to create them.
     """
+    await register_principal_tag_rows(await db.connection(), tag_names)
     tag_rows = (
         (
             await db.execute(

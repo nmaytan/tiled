@@ -749,6 +749,21 @@ def build_app(
                 await app.state.access_policy.access_tags_parser.connect(
                     access_tags_catalog_context.database_settings
                 )
+                # The scopes in the catalog database (written there by the
+                # access tags compiler) should be a subset of the scopes that
+                # the server's access policy is configured with.
+                defined_scopes = (
+                    await app.state.access_policy.access_tags_parser.get_defined_scopes()
+                )
+                unknown_scopes = defined_scopes - set(app.state.access_policy.scopes)
+                if unknown_scopes:
+                    logger.warning(
+                        f"The catalog database contains scopes that the access "
+                        f"policy is not configured with: {sorted(unknown_scopes)}. "
+                        f"This suggests the access tags were compiled with a "
+                        f"different scope list than the access policy's. Tag "
+                        f"grants holding these scopes may be restricted."
+                    )
 
             async def purge_expired_sessions_and_api_keys():
                 PURGE_INTERVAL = 600  # seconds

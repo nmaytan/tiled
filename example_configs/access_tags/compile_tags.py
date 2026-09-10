@@ -2,9 +2,24 @@ import asyncio
 from pathlib import Path
 
 from tiled.access_control.access_tags import AccessTagsCompiler
-from tiled.access_control.scopes import ALL_SCOPES
 from tiled.server.connection_pool import close_database_connection_pool
 from tiled.server.settings import DatabaseSettings
+
+# The valid scopes for compilation. The compiler and the access policy must
+# be fed the same scope list: the scopes in the catalog database must be a
+# subset of the policy's scopes (the server warns at startup otherwise), and
+# the policy ignores any tag grant that is not a pure subset of its scopes.
+# This list matches the policy 'scopes' in toy_authentication.yml.
+SCOPES = [
+    "read:metadata",
+    "read:data",
+    "write:metadata",
+    "write:data",
+    "delete:revision",
+    "delete:node",
+    "create:node",
+    "register",
+]
 
 
 def group_parser(groupname):
@@ -29,7 +44,7 @@ async def main():
     database_settings = DatabaseSettings(uri=f"sqlite+aiosqlite:///{catalog_database}")
 
     access_tags_compiler = AccessTagsCompiler(
-        ALL_SCOPES,
+        SCOPES,
         Path(file_directory, "tag_definitions.yml"),
         database_settings,
         group_parser,

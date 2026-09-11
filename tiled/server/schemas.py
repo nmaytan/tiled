@@ -223,7 +223,9 @@ class NodeAttributes(pydantic.BaseModel):
             TableStructure,
         ]
     ] = None
-    access_tags: Optional[List[str]] = None  # list of tags that control access to this node
+    access_tags: Optional[
+        List[str]
+    ] = None  # list of tags that control access to this node
 
     sorting: Optional[List[SortingItem]] = None
     data_sources: Optional[List[DataSource]] = None

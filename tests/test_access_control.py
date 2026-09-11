@@ -237,9 +237,7 @@ def _server_config(catalog_uri, authn_uri, tmp_path):
             "providers": [
                 {
                     "provider": "toy",
-                    "authenticator": (
-                        "tiled.authenticators:DictionaryAuthenticator"
-                    ),
+                    "authenticator": ("tiled.authenticators:DictionaryAuthenticator"),
                     "args": {
                         "users_to_passwords": {
                             "alice": "alice",
@@ -375,8 +373,15 @@ def compile_access_tags_tables(catalog_uri, tmp_path_factory):
     # the app's startup revision check. initialize_database alone does not
     # stamp.
     subprocess.run(
-        [sys.executable, "-m", "tiled", "catalog", "init", "--if-not-exists",
-         ensure_specified_sql_driver(catalog_uri)],
+        [
+            sys.executable,
+            "-m",
+            "tiled",
+            "catalog",
+            "init",
+            "--if-not-exists",
+            ensure_specified_sql_driver(catalog_uri),
+        ],
         check=True,
         capture_output=True,
     )
@@ -633,9 +638,7 @@ def _principal_owns_tag(catalog_uri, tag_name, principal=None):
     ``access_tags_principals``.
     """
     sql = (
-        "SELECT 1 "
-        "FROM access_tag_owners o "
-        "JOIN access_tags t ON t.id = o.tag_id "
+        "SELECT 1 " "FROM access_tag_owners o " "JOIN access_tags t ON t.id = o.tag_id "
     )
     params = {"t": tag_name}
     if principal is not None:
@@ -1262,7 +1265,9 @@ def test_node_export_access_control(
 
 
 def test_principal_tag_generated_from_authn_db(
-    access_control_test_context_factory, compile_access_tags_tables_with_reset, catalog_uri
+    access_control_test_context_factory,
+    compile_access_tags_tables_with_reset,
+    catalog_uri,
 ):
     """
     A principal tag (``user:<id>``) is generated purely from the authn database
@@ -1296,12 +1301,8 @@ def test_principal_tag_generated_from_authn_db(
     # which grants read/write) -- it could only have come from the authn DB,
     # since the config never defined it.
     assert _tag_exists(catalog_uri, "user:alice")
-    assert _principal_has_scope_on_tag(
-        catalog_uri, "user:alice", "alice", "read:data"
-    )
-    assert _principal_has_scope_on_tag(
-        catalog_uri, "user:alice", "alice", "write:data"
-    )
+    assert _principal_has_scope_on_tag(catalog_uri, "user:alice", "alice", "read:data")
+    assert _principal_has_scope_on_tag(catalog_uri, "user:alice", "alice", "write:data")
     # 'register' is not in alice's 'user' role, so a pure-authn compilation must
     # NOT grant it (this would only appear if a config definition contributed).
     assert not _principal_has_scope_on_tag(
@@ -1310,7 +1311,9 @@ def test_principal_tag_generated_from_authn_db(
 
 
 def test_principal_tag_config_scopes_unioned_with_auth_scopes(
-    access_control_test_context_factory, compile_access_tags_tables_with_reset, catalog_uri
+    access_control_test_context_factory,
+    compile_access_tags_tables_with_reset,
+    catalog_uri,
 ):
     """
     When a ``user:<id>`` tag is defined in the tag config with its own scopes
@@ -1353,7 +1356,9 @@ def test_principal_tag_config_scopes_unioned_with_auth_scopes(
 
 
 def test_in_use_tag_retained_on_recompile(
-    access_control_test_context_factory, compile_access_tags_tables_with_reset, catalog_uri
+    access_control_test_context_factory,
+    compile_access_tags_tables_with_reset,
+    catalog_uri,
 ):
     """
     When a tag is dropped from the tag config but is still assigned to a node,
@@ -1463,7 +1468,9 @@ def test_apikey_auth_access_control(access_control_test_context_factory):
 
 
 def test_service_principal_access_control(
-    access_control_test_context_factory, compile_access_tags_tables_with_reset, catalog_uri
+    access_control_test_context_factory,
+    compile_access_tags_tables_with_reset,
+    catalog_uri,
 ):
     """
     Test that access control works for service principals.

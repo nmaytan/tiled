@@ -319,16 +319,17 @@ class AccessTagPrincipalScope(Base):
     )
 
     tag: Mapped["AccessTag"] = relationship(back_populates="principal_scopes")
-    principal: Mapped["AccessTagsPrincipal"] = relationship(
-        back_populates="tag_scopes"
-    )
+    principal: Mapped["AccessTagsPrincipal"] = relationship(back_populates="tag_scopes")
     scope: Mapped["Scope"] = relationship(back_populates="principal_tags")
 
     __table_args__ = (
         # Serves '(tag, principal) -> scopes' probes, e.g. checking scopes on a
         # node given its tags.
         PrimaryKeyConstraint(
-            "tag_id", "principal_id", "scope_id", name="access_tag_principal_scopes_pkey"
+            "tag_id",
+            "principal_id",
+            "scope_id",
+            name="access_tag_principal_scopes_pkey",
         ),
         # Covering index serving '(principal, scope) -> tags' lookups, used to
         # filter nodes visible to a principal.
@@ -370,9 +371,7 @@ class AccessTagOwner(Base):
     )
 
     tag: Mapped["AccessTag"] = relationship(back_populates="owners")
-    principal: Mapped["AccessTagsPrincipal"] = relationship(
-        back_populates="owned_tags"
-    )
+    principal: Mapped["AccessTagsPrincipal"] = relationship(back_populates="owned_tags")
 
     __table_args__ = (
         # Serves 'owners of a tag' and exact (tag, principal) membership probes.

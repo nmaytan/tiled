@@ -72,6 +72,7 @@ from tiled.queries import (
     StructureFamilyQuery,
 )
 
+from ..access_control.protocols import AccessTags
 from ..adapters.utils import DataNotReadyError, IncompatibleShapeError
 from ..mimetypes import (
     APACHE_ARROW_FILE_MIME_TYPE,
@@ -113,7 +114,6 @@ from ..storage import (
     register_storage,
 )
 from ..structures.core import Spec, StructureFamily
-from ..access_control.protocols import AccessTags
 from ..utils import (
     UNCHANGED,
     Conflicts,

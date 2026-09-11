@@ -462,9 +462,7 @@ def build_app(
     # unrelated authn/session database.
     catalog_context = getattr(tree, "context", None)
     if catalog_context is not None:
-        app.include_router(
-            get_links_router(lambda: catalog_context.database_settings)
-        )
+        app.include_router(get_links_router(lambda: catalog_context.database_settings))
 
     # The Tree and Authenticator have the opportunity to add custom routes to
     # the server here. (Just for example, a Tree of BlueskyRuns uses this

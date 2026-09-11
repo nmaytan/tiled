@@ -270,7 +270,9 @@ class GraphSQLAlchemyStore:
         """Replace the tag associations of an entity or link."""
         tag_ids = await _resolve_tag_ids(conn, tag_names)
         await conn.execute(
-            delete(assoc_table).where(getattr(assoc_table.c, assoc_id_column_name) == id)
+            delete(assoc_table).where(
+                getattr(assoc_table.c, assoc_id_column_name) == id
+            )
         )
         if tag_ids:
             await conn.execute(
@@ -390,7 +392,11 @@ class GraphSQLAlchemyStore:
             if existing is None:
                 return None
             effective_node_id = node_id if node_id is not UNSET else existing.node_id
-            if access_tags is not UNSET and effective_node_id is not None and access_tags:
+            if (
+                access_tags is not UNSET
+                and effective_node_id is not None
+                and access_tags
+            ):
                 raise IntegrityError("entity node access tags", {}, None)
             if existing.node_id is None and effective_node_id is not None:
                 # Becoming node-backed: shed own tags first, so the

@@ -141,9 +141,8 @@ class TagBasedAccessPolicy(AccessPolicy):
                     raise ValueError(
                         "Cannot apply empty tag list to node: only Tiled admins can apply an empty tag list."
                     )
-            if (
-                any(tag.startswith("user:") for tag in access_tags) or
-                any(tag.startswith("service:") for tag in access_tags)
+            if any(tag.startswith("user:") for tag in access_tags) or any(
+                tag.startswith("service:") for tag in access_tags
             ):
                 raise ValueError(
                     f"Cannot manually tag node with user tags.\n"
@@ -231,9 +230,7 @@ class TagBasedAccessPolicy(AccessPolicy):
             identifier = self._get_id(principal)
 
         if access_tags is None:
-            logger.info(
-                "Node access_tags not modified; no access_tags provided."
-            )
+            logger.info("Node access_tags not modified; no access_tags provided.")
             return False, node.access_tags
         try:
             access_tags = AccessTags(access_tags)
@@ -253,9 +250,8 @@ class TagBasedAccessPolicy(AccessPolicy):
                 raise ValueError(
                     "Cannot apply empty tag list to node: only Tiled admins can apply an empty tag list."
                 )
-        if (
-            any(tag.startswith("user:") for tag in access_tags) or
-            any(tag.startswith("service:") for tag in access_tags)
+        if any(tag.startswith("user:") for tag in access_tags) or any(
+            tag.startswith("service:") for tag in access_tags
         ):
             raise ValueError(
                 f"Cannot manually tag node with user tags.\n"
@@ -317,9 +313,7 @@ class TagBasedAccessPolicy(AccessPolicy):
                         "Cannot remove 'public' tag from node: only Tiled admins can remove the 'public' tag."
                     )
             elif not await self.is_tag_defined(tag):
-                raise ValueError(
-                    f"Cannot remove tag from node: {tag=} is not defined"
-                )
+                raise ValueError(f"Cannot remove tag from node: {tag=} is not defined")
             elif not await self.is_tag_owner(tag, identifier):
                 # admins can ignore the tag ownership check
                 if not self._is_admin(authn_scopes):

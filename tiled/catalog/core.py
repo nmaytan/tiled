@@ -37,7 +37,6 @@ REQUIRED_REVISION = ALL_REVISIONS[0]
 
 async def initialize_database(engine: AsyncEngine):
     from ..graph import orm as graph_orm  # noqa: F401
-
     from . import orm  # noqa: F401
 
     async with engine.connect() as connection:
@@ -107,9 +106,7 @@ async def register_principal_tag_rows(connection, tag_names):
         from sqlalchemy.dialects.sqlite import insert as upsert
     await connection.execute(
         upsert(orm.AccessTag.__table__)
-        .values(
-            [{"name": name, "is_public": False} for name in sorted(principal_tags)]
-        )
+        .values([{"name": name, "is_public": False} for name in sorted(principal_tags)])
         .on_conflict_do_nothing(index_elements=["name"])
     )
 

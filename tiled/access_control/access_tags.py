@@ -294,9 +294,7 @@ async def update_access_tags_tables(engine, scopes, tags, owners, public_tags):
 
         # delete outdated items; deletes cascade to the association tables
         deleted_tag_ids = [
-            tag_id
-            for tag_id in stale_tags.values()
-            if tag_id not in retained_tag_ids
+            tag_id for tag_id in stale_tags.values() if tag_id not in retained_tag_ids
         ]
         if deleted_tag_ids:
             await connection.execute(

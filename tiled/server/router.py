@@ -55,12 +55,7 @@ from ..ndslice import NDBlock, NDSlice
 from ..stream_messages import ArrayPatch
 from ..structures.core import Spec, StructureFamily
 from ..type_aliases import Scopes
-from ..utils import (
-    BrokenLink,
-    ensure_awaitable,
-    patch_mimetypes,
-    path_from_uri,
-)
+from ..utils import BrokenLink, ensure_awaitable, patch_mimetypes, path_from_uri
 from ..validation_registration import ValidationError, ValidationRegistry
 from . import schemas
 from ._backcompat import (

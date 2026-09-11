@@ -44,7 +44,6 @@ from tiled.server.webhooks import (
     _sign,
     check_url_ssrf_safety,
 )
-from tiled.type_aliases import AccessBlob
 
 from .conftest import TOY_AUTHENTICATION
 from .utils import enter_username_password
@@ -854,7 +853,7 @@ def _make_close_stream_adapter(
     mock_node.key = node_key
     mock_node.structure_family = "container"
     mock_node.specs = []
-    mock_node.access_blob = AccessBlob(tags=[])
+    mock_node.access_tags = []
 
     adapter = CatalogNodeAdapter(mock_context, mock_node)
     adapter.path_segments = AsyncMock(return_value=[node_key])

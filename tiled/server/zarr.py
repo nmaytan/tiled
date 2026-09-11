@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import Response
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
 
+from ..access_control.protocols import AccessTags
 from ..structures.core import StructureFamily
-from ..type_aliases import AccessTags, Scopes
+from ..type_aliases import Scopes
 from ..utils import ensure_awaitable
 from .authentication import (
     get_current_access_tags,

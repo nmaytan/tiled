@@ -30,7 +30,6 @@ from urllib.parse import urlparse
 import anyio
 from fastapi import HTTPException
 from sqlalchemy import (
-    String,
     delete,
     exists,
     false,
@@ -50,10 +49,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.sql.expression import cast as sql_cast
 from sqlalchemy.sql.sqltypes import MatchType
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_415_UNSUPPORTED_MEDIA_TYPE
+from starlette.status import (
+    HTTP_403_FORBIDDEN,
+    HTTP_404_NOT_FOUND,
+    HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+)
 
 from tiled.queries import (
-    AccessBlobFilter,
+    AccessTagsFilter,
     Comparison,
     Contains,
     Eq,
@@ -69,6 +72,7 @@ from tiled.queries import (
     StructureFamilyQuery,
 )
 
+from ..access_control.protocols import AccessTags
 from ..adapters.utils import DataNotReadyError, IncompatibleShapeError
 from ..mimetypes import (
     APACHE_ARROW_FILE_MIME_TYPE,
@@ -110,7 +114,6 @@ from ..storage import (
     register_storage,
 )
 from ..structures.core import Spec, StructureFamily
-from ..type_aliases import AccessBlob
 from ..utils import (
     UNCHANGED,
     Conflicts,
@@ -122,7 +125,11 @@ from ..utils import (
     path_from_uri,
 )
 from . import orm
-from .core import check_catalog_database, initialize_database
+from .core import (
+    check_catalog_database,
+    initialize_database,
+    register_principal_tag_rows,
+)
 from .explain import ExplainAsyncSession
 from .utils import compute_structure_id
 
@@ -193,7 +200,7 @@ class RootNode:
 
     structure_family = StructureFamily.container
 
-    def __init__(self, metadata, specs, top_level_access_blob):
+    def __init__(self, metadata, specs, top_level_access_tags):
         self.id = 0
         self.parent = None
         self.metadata_ = metadata or {}
@@ -201,22 +208,40 @@ class RootNode:
         self.key = ""
         self.data_sources = None
 
-        if top_level_access_blob is None:
-            self.access_blob = AccessBlob(tags=[])
-        elif "user" in top_level_access_blob:
-            self.access_blob = AccessBlob(username=top_level_access_blob["user"])
-        else:
-            self.access_blob = AccessBlob(tags=top_level_access_blob["tags"])
+        self.access_tags = AccessTags(top_level_access_tags or [])
 
 
-def _access_blob_to_orm(access_blob: AccessBlob | None) -> orm.AccessBlob:
-    if access_blob is None:
-        return orm.AccessBlob(kind="tags", tags=[])
-    if access_blob.username is not None:
-        return orm.AccessBlob(kind="user", username=access_blob.username)
-    if access_blob.tags is not None:
-        return orm.AccessBlob(kind="tags", tags=access_blob.tags)
-    return orm.AccessBlob(kind="tags", tags=[])
+async def _resolve_access_tags(db, tag_names):
+    """
+    Resolve tag names to orm.AccessTag rows in the given session.
+
+    Fetches only the requested names (an indexed IN lookup, not a scan of
+    the tags table). A node cannot be associated with a tag that has no
+    row, so unknown names raise. Normally the access policy has already
+    validated the tags; this fires only for requests that bypassed the
+    policy or raced a tag-definition resync, and it uses the same status
+    code that the policy check produces (403).
+
+    Principal tags are slightly different: these need to exist at write,
+    possibly before the tags compiler has been able to create them.
+    """
+    await register_principal_tag_rows(await db.connection(), tag_names)
+    tag_rows = (
+        (
+            await db.execute(
+                select(orm.AccessTag).where(orm.AccessTag.name.in_(tag_names))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    missing = set(tag_names) - {tag.name for tag in tag_rows}
+    if missing:
+        raise HTTPException(
+            status_code=HTTP_403_FORBIDDEN,
+            detail=f"Cannot apply access tags that are not defined: {sorted(missing)}",
+        )
+    return list(tag_rows)
 
 
 class Context:
@@ -356,7 +381,7 @@ class CatalogNodeAdapter:
                     mount_path,
                     create_if_not_exist=create_mount_nodes_if_not_exist,
                     specs=node.specs,
-                    access_blob=node.access_blob,
+                    access_tags=node.access_tags,
                 )
             )
         self.shutdown_tasks = [self.shutdown]
@@ -374,8 +399,12 @@ class CatalogNodeAdapter:
             return (await db.execute(statement)).scalars().all()
 
     @property
-    def access_blob(self):
-        return self.node.access_blob
+    def access_tags(self):
+        if isinstance(self.node, RootNode):
+            # Configured at server startup, not stored in the database;
+            # already an AccessTags frozenset of names.
+            return self.node.access_tags
+        return AccessTags(tag.name for tag in self.node.access_tags)
 
     def metadata(self):
         return self.node.metadata_
@@ -389,7 +418,7 @@ class CatalogNodeAdapter:
         *,
         create_if_not_exist=False,
         specs=None,
-        access_blob=None,
+        access_tags=None,
     ):
         statement = node_from_segments(mount_path).with_only_columns(orm.Node.id)
         async with self.context.engine.connect() as conn:
@@ -406,7 +435,7 @@ class CatalogNodeAdapter:
                     self.context.engine,
                     mount_path,
                     specs=specs,
-                    access_blob=access_blob,
+                    access_tags=access_tags,
                 )
                 # Re-query to get the id of the newly created node.
                 async with self.context.engine.connect() as conn:
@@ -937,10 +966,9 @@ class CatalogNodeAdapter:
         key=None,
         specs=None,
         data_sources=None,
-        access_blob=None,
+        access_tags=None,
     ):
-        if access_blob is None:
-            access_blob = AccessBlob(tags=[])
+        access_tags = AccessTags(access_tags or [])
         key = key or self.context.key_maker()
         data_sources = data_sources or []
 
@@ -951,8 +979,11 @@ class CatalogNodeAdapter:
             structure_family=structure_family,
             specs=specs or [],
         )
-        node.access_blob = _access_blob_to_orm(access_blob)
         async with self.context.session() as db:
+            if access_tags:
+                # Assigning AccessTag rows to the (many-to-many) relationship
+                # creates the node_access_tags association rows on flush.
+                node.access_tags = await _resolve_access_tags(db, access_tags)
             # TODO Consider using nested transitions to ensure that
             # both the node is created (name not already taken)
             # and the directory/file is created---or neither are.
@@ -1086,11 +1117,8 @@ class CatalogNodeAdapter:
                     "specs": [spec.model_dump() for spec in (specs or [])],
                     "metadata": metadata,
                     "data_sources": [d.model_dump() for d in data_sources_with_ids],
-                    "access_blob": (
-                        {"user": refreshed_node.access_blob.username}
-                        if refreshed_node.access_blob.username is not None
-                        else {"tags": refreshed_node.access_blob.tags}
-                    ),
+                    # JSON-serializable list of tag names.
+                    "access_tags": [tag.name for tag in refreshed_node.access_tags],
                 }
 
                 # Cache data in Redis with a TTL, and publish
@@ -1499,7 +1527,7 @@ class CatalogNodeAdapter:
             await db.commit()
 
     async def replace_metadata(
-        self, metadata=None, specs=None, access_blob=None, *, drop_revision=False
+        self, metadata=None, specs=None, access_tags=None, *, drop_revision=False
     ):
         values = {}
         if metadata is not None:
@@ -1538,22 +1566,16 @@ class CatalogNodeAdapter:
                 await db.execute(
                     update(orm.Node).where(orm.Node.id == self.node.id).values(**values)
                 )
-            if access_blob is not None:
-                access_blob_orm = _access_blob_to_orm(access_blob)
+            if access_tags is not None:
+                # Replace the node's tag set: drop existing association rows
+                # and insert one per (deduplicated) tag name.
                 await db.execute(
-                    update(orm.AccessBlob)
-                    .where(
-                        orm.AccessBlob.id
-                        == select(orm.NodeAccessBlob.access_blob_id)
-                        .where(orm.NodeAccessBlob.node_id == self.node.id)
-                        .scalar_subquery()
-                    )
-                    .values(
-                        kind=access_blob_orm.kind,
-                        username=access_blob_orm.username,
-                        tags=access_blob_orm.tags,
+                    delete(orm.NodeAccessTag).where(
+                        orm.NodeAccessTag.node_id == self.node.id
                     )
                 )
+                for tag in await _resolve_access_tags(db, AccessTags(access_tags)):
+                    db.add(orm.NodeAccessTag(node_id=self.node.id, tag_id=tag.id))
             await db.commit()
             # Upon successful update, inform websocket subscribers through redis
             if self.context.streaming_cache:
@@ -2401,56 +2423,23 @@ def specs(query, tree):
     return tree.new_variation(conditions=tree.conditions + conditions)
 
 
-def access_blob_filter(query, tree):
-    dialect_name = tree.context.engine.url.get_dialect().name
-    if not (query.user_id or query.tags):
-        # Results cannot possibly match an empty value or list,
+def access_tags_filter(query, tree):
+    if not query.tags:
+        # Results cannot possibly match an empty list,
         # so put a False condition in the list ensuring that
         # there are no rows returned.
         condition = false()
     else:
-        filters = []
-        if query.tags:
-            if dialect_name == "sqlite":
-                access_tags_json = func.json_each(orm.AccessBlob.tags).table_valued(
-                    "value"
-                )
-                tags_match = (
-                    select(orm.NodeAccessBlob.node_id)
-                    .join(orm.AccessBlob)
-                    .where(
-                        orm.AccessBlob.kind == "tags",
-                        select(1)
-                        .select_from(access_tags_json)
-                        .where(access_tags_json.c.value.in_(query.tags))
-                        .exists(),
-                    )
-                )
-            elif dialect_name == "postgresql":
-                tags_match = (
-                    select(orm.NodeAccessBlob.node_id)
-                    .join(orm.AccessBlob)
-                    .where(
-                        orm.AccessBlob.kind == "tags",
-                        type_coerce(orm.AccessBlob.tags, ARRAY(String())).overlap(
-                            sql_cast(query.tags, ARRAY(String()))
-                        ),
-                    )
-                )
-            else:
-                raise UnsupportedQueryType("access_blob_filter")
-            filters.append(orm.Node.id.in_(tags_match))
-        if query.user_id is not None:
-            user_match = (
-                select(orm.NodeAccessBlob.node_id)
-                .join(orm.AccessBlob)
-                .where(
-                    orm.AccessBlob.kind == "user",
-                    orm.AccessBlob.username == query.user_id,
-                )
-            )
-            filters.append(orm.Node.id.in_(user_match))
-        condition = or_(*filters) if filters else false()
+        # Nodes carrying at least one of the given access tags.
+        # EXISTS is used (vs IN) as it is much more preformant in SQLite,
+        # though performance in Postgres appears similar for both.
+        condition = (
+            select(orm.NodeAccessTag.node_id)
+            .join(orm.AccessTag, orm.AccessTag.id == orm.NodeAccessTag.tag_id)
+            .where(orm.NodeAccessTag.node_id == orm.Node.id)
+            .where(orm.AccessTag.name.in_(query.tags))
+            .exists()
+        )
 
     return tree.new_variation(conditions=tree.conditions + [condition])
 
@@ -2548,7 +2537,7 @@ CatalogNodeAdapter.register_query(KeyPresent, key_present)
 CatalogNodeAdapter.register_query(KeysFilter, keys_filter)
 CatalogNodeAdapter.register_query(StructureFamilyQuery, structure_family)
 CatalogNodeAdapter.register_query(SpecsQuery, specs)
-CatalogNodeAdapter.register_query(AccessBlobFilter, access_blob_filter)
+CatalogNodeAdapter.register_query(AccessTagsFilter, access_tags_filter)
 CatalogNodeAdapter.register_query(FullText, full_text)
 CatalogNodeAdapter.register_query(Like, like)
 
@@ -2561,7 +2550,7 @@ def in_memory(
     writable_storage=None,
     readable_storage=None,
     adapters_by_mimetype=None,
-    top_level_access_blob=None,
+    top_level_access_tags=None,
     cache_config=None,
     webhook_secret_keys: Optional[List[str]] = None,
 ):
@@ -2579,23 +2568,24 @@ def in_memory(
         readable_storage=readable_storage,
         init_if_not_exists=True,
         adapters_by_mimetype=adapters_by_mimetype,
-        top_level_access_blob=top_level_access_blob,
+        top_level_access_tags=top_level_access_tags,
         cache_config=cache_config,
         webhook_secret_keys=webhook_secret_keys,
     )
 
 
-async def _create_mount_node_segments(engine, mount_path, specs=None, access_blob=None):
+async def _create_mount_node_segments(engine, mount_path, specs=None, access_tags=None):
     """Create missing intermediate container nodes for a mount path.
 
     Walks the path segments, creating any that don't exist yet.
     DB triggers automatically maintain the nodes_closure table.
-    The leaf node (last segment) receives the given specs and access_blob;
+    The leaf node (last segment) receives the given specs and access_tags;
     intermediate nodes get empty defaults.
     """
     from sqlalchemy import insert
 
     specs = specs or []
+    access_tags = AccessTags(access_tags or [])
     async with engine.begin() as conn:
         parent_id = 0  # root node id
         for i, segment in enumerate(mount_path):
@@ -2619,23 +2609,30 @@ async def _create_mount_node_segments(engine, mount_path, specs=None, access_blo
                     )
                 )
                 node_id = result.inserted_primary_key[0]
-                node_access_blob = (
-                    access_blob if (is_leaf and access_blob) else AccessBlob(tags=[])
-                )
-                access_blob_orm = _access_blob_to_orm(node_access_blob)
-                access_blob_result = await conn.execute(
-                    insert(orm.AccessBlob).values(
-                        kind=access_blob_orm.kind,
-                        username=access_blob_orm.username,
-                        tags=access_blob_orm.tags,
+                node_access_tags = access_tags if is_leaf else AccessTags([])
+                if node_access_tags:
+                    # Resolve tag names to ids; raise on any undefined tag.
+                    rows = (
+                        await conn.execute(
+                            select(orm.AccessTag.id, orm.AccessTag.name).where(
+                                orm.AccessTag.name.in_(node_access_tags)
+                            )
+                        )
+                    ).all()
+                    missing = set(node_access_tags) - {name for _, name in rows}
+                    if missing:
+                        raise ValueError(
+                            "Cannot apply access tags that are not defined: "
+                            f"{sorted(missing)}"
+                        )
+                    await conn.execute(
+                        insert(orm.NodeAccessTag).values(
+                            [
+                                {"node_id": node_id, "tag_id": tag_id}
+                                for tag_id, _ in rows
+                            ]
+                        )
                     )
-                )
-                await conn.execute(
-                    insert(orm.NodeAccessBlob).values(
-                        node_id=node_id,
-                        access_blob_id=access_blob_result.inserted_primary_key[0],
-                    )
-                )
                 logger.info(
                     "Created container node %r (id=%d) under parent_id=%d.",
                     segment,
@@ -2654,7 +2651,7 @@ def from_uri(
     readable_storage=None,
     init_if_not_exists=False,
     adapters_by_mimetype=None,
-    top_level_access_blob=None,
+    top_level_access_tags=None,
     mount_node: Optional[Union[str, List[str]]] = None,
     create_mount_nodes_if_not_exist=False,
     cache_config=None,
@@ -2702,7 +2699,7 @@ def from_uri(
         storage_max_overflow=storage_max_overflow,
         webhook_secret_keys=webhook_secret_keys,
     )
-    node = RootNode(metadata, specs, top_level_access_blob)
+    node = RootNode(metadata, specs, top_level_access_tags)
     mount_path = (
         [segment for segment in mount_node.split("/") if segment]
         if isinstance(mount_node, str)

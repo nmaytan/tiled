@@ -1,5 +1,4 @@
 import sys
-from dataclasses import dataclass
 
 from pydantic import AfterValidator
 
@@ -32,15 +31,6 @@ JSON = Mapping[str, JSON_ITEM]
 Scopes = Set[str]
 Query = Any  # for now...
 Filters = List[Query]
-
-
-@dataclass(frozen=True)
-class AccessBlob:
-    username: str | None = None
-    tags: list[str] | None = None
-
-
-AccessTags = Set[str]
 Chunks = Tuple[Tuple[int, ...], ...]
 
 AppTask = Callable[[], Coroutine[None, None, Any]]
@@ -60,7 +50,6 @@ EntryPointString = Annotated[
 
 
 __all__ = [
-    "AccessBlob",
     "AppTask",
     "EllipsisType",
     "JSON",

@@ -25,9 +25,7 @@ from .utils import enter_username_password, fail_with_status_code, temp_postgres
 arr = numpy.ones((5, 5))
 
 
-# The access tag definitions compiled into the catalog database. These are the
-# same set the original SQLite-sidecar tests used; the compiler now writes them
-# into the catalog database, where the server's AccessTagsParser reads them.
+# The access tag definitions compiled into the catalog database.
 access_tag_config = {
     "roles": {
         "facility_user": {
@@ -190,19 +188,6 @@ TOP_LEVEL_TAGS = {
 
 
 def _server_config(catalog_uri, authn_uri, tmp_path):
-    """
-    Build the server config: four catalog trees (foo/bar/baz/qux), each a mount
-    of a distinct top-level node in ONE shared catalog database, under a
-    MapAdapter root -- the same topology used in production (multiple mounts,
-    one catalog database). Plus the TagBasedAccessPolicy and toy authentication.
-
-    Each mount node carries its own top-level access tags; the MapAdapter root
-    (a plain in-memory map, not a catalog) has no access control, matching the
-    original tests' assumptions about the top level. create_mount_nodes_if_not_
-    exist lets the server create the mount nodes -- applying their access tags
-    -- at startup; the tags must already be defined (the compiler runs first).
-    """
-
     def _tree(path, access_tags):
         mount = path.strip("/").upper()
         return {
@@ -288,7 +273,7 @@ def _database_settings(uri):
 
 def _compiler_run(compiler, catalog_uri, method="compile"):
     """
-    Run ``compiler.<method>()`` (compile or recompile) on a fresh event loop
+    Run ``compiler.<method>()`` (e.g. compile or recompile) on a fresh event loop
     with a fresh database engine bound to that loop, then dispose it.
 
     The compiler is a long-lived Python object reused across several
@@ -410,10 +395,6 @@ def compile_access_tags_tables_with_reset(compile_access_tags_tables):
     Give a test a compiler whose tag_config is a private deep copy it may
     freely mutate and recompile; on teardown, restore the original config and
     recompile so the shared catalog database returns to its baseline state.
-
-    This mirrors the original fixture of the same name: the tests that use it
-    are a carefully ordered sequence of mutate-then-restore steps, preserved
-    verbatim.
     """
     compiler, catalog_uri = compile_access_tags_tables
     compiler.tag_config = deepcopy(access_tag_config)
@@ -428,9 +409,9 @@ def compile_access_tags_tables_with_reset(compile_access_tags_tables):
 @pytest.fixture(scope="module")
 def access_control_test_context_factory(compile_access_tags_tables, tmp_path_factory):
     """
-    Build the server app (four catalog mounts sharing one database) once per
+    Build the server app (mulitple catalog mounts sharing one database) once per
     backend, seed the standard data, and return a factory that logs in a user
-    and caches the resulting client (Context construction is the expensive
+    and caches the resulting client (Context construction is an expensive
     step, so contexts are created once per user and reused).
     """
     _compiler, catalog_uri = compile_access_tags_tables
@@ -480,8 +461,6 @@ def access_control_test_context_factory(compile_access_tags_tables, tmp_path_fac
     _create_and_login_context.authn_uri = authn_uri
 
     admin_client = _create_and_login_context("admin", "admin")
-    # The four mount nodes (foo/bar/baz/qux) are created by the app at startup
-    # with their access tags. Seed the standard data set into each.
     for k in TOP_LEVEL_TAGS:
         admin_client[k].write_array(arr, key="data_A", access_tags=["alice_tag"])
         admin_client[k].write_array(arr, key="data_B", access_tags=["chemists_tag"])
@@ -500,10 +479,9 @@ def catalog_db_execute(catalog_uri, statements):
     surgically edit catalog tables directly.
 
     Runs on the shared async engine (the same pool the app uses), so it works
-    identically on SQLite and PostgreSQL with only asyncpg installed -- no
-    separate synchronous driver required. `statements` is a SQL string or an
-    iterable of (sql, params) / sql items; a single string is treated as one
-    statement with no params.
+    identically on SQLite and PostgreSQL.
+    `statements` is a SQL string or an iterable of (sql, params) / sql items;
+    a single string is treated as one statement with no params.
     """
     if isinstance(statements, str):
         statements = [statements]
@@ -554,10 +532,7 @@ def _principal_has_scope_on_access_tag(
 ):
     """
     Whether ``principal`` has any scope (or a specific ``scope_name``) on
-    ``access_tag_name`` in the catalog database. Replaces the old sidecar
-    ``user_tag_scopes`` lookups (access_tag_name/user_name/scope_name), which are now
-    the ``access_tag_principal_scopes`` junction joined to ``access_tags``,
-    ``access_tags_principals`` and (for a scope name) ``scopes``.
+    ``access_tag_name`` in the catalog database.
     """
     sql = (
         "SELECT 1 "
@@ -580,13 +555,9 @@ def _set_node_access_tags(catalog_uri, node_key, access_tag_names):
     """
     Surgically set the access tags on the catalog node with key ``node_key`` to
     exactly ``access_tag_names`` (creating bare ``access_tags`` rows for any tag that
-    does not yet exist). Replaces the old sidecar surgery that rewrote an
-    ``access_blobs`` row's JSON ``tags``; the node<->tag mapping now lives in
-    the ``node_access_tags`` junction.
+    does not yet exist).
     """
     statements = []
-    # Ensure each tag name exists in access_tags (name-only bare row is fine
-    # for these tests, which check policy behavior, not tag semantics).
     for name in access_tag_names:
         statements.append(
             (
@@ -625,8 +596,7 @@ def _delete_node_access_tags(catalog_uri, node_key):
     """
     Surgically remove ALL access-tag rows for the node with key ``node_key``,
     leaving a node with zero ``node_access_tags`` entries. In the access-tags
-    model such a node is admin-only (no tag grants any principal access),
-    replacing the old "node has no access_blob row" migration edge case.
+    model such a node is admin-only (no tag grants any principal access).
     """
     catalog_db_execute(
         catalog_uri,
@@ -643,9 +613,6 @@ def _delete_node_access_tags(catalog_uri, node_key):
 def _principal_owns_access_tag(catalog_uri, access_tag_name, principal=None):
     """
     Whether ``access_tag_name`` has any owner (or specifically ``principal`` as owner).
-    Replaces the old sidecar ``user_tag_owners`` lookups; owners now live in the
-    ``access_tag_owners`` junction joined to ``access_tags`` and
-    ``access_tags_principals``.
     """
     sql = (
         "SELECT 1 " "FROM access_tag_owners o " "JOIN access_tags t ON t.id = o.tag_id "
@@ -954,9 +921,10 @@ def test_deletion_access_control(access_control_test_context_factory):
 
 def test_user_owned_node_access_control(access_control_test_context_factory):
     """
-    Test that user-owned nodes (i.e. nodes created without access tags applied)
-      are visible after creation and can be modified by the user.
-    Also test that the data is visible after a tag is applied, and
+    Test that user-owned nodes (i.e. nodes created without specific
+    access tags applied) are visible after creation and can be modified
+    by the user.
+    Also test that the data is visible after a different tag is applied, and
       that other users cannot see user-owned nodes.
 
     This exercises the principal tag (``user:<id>``) purely through the access
@@ -1183,9 +1151,7 @@ def test_empty_tags_node_access_control(
     Test the case where a node in the catalog has zero access-tag rows.
 
     In the access-tags model, a node with no tags grants no principal any
-    access, so it is visible only to admins. (This replaces the old
-    "node has no access_blob row" migration edge case, which likewise
-    left the node admin-only.)
+    access, so it is visible only to admins.
     """
     admin_client = access_control_test_context_factory("admin", "admin")
     alice_client = access_control_test_context_factory("alice", "alice")
@@ -1283,14 +1249,8 @@ def test_principal_tag_generated_from_authn_db(
 ):
     """
     A principal tag (``user:<id>``) is generated purely from the authn database
-    -- with NO definition of it in the tag config -- proving the authn-database
+    with no definition of it in the tag config, proving the authn-database
     compilation path works on its own.
-
-    ``load_principal_tags`` reads the authn database and defines a ``user:<id>``
-    tag per principal, granting the scopes of that principal's authenticated
-    role. This test isolates that path: the tag config contains no ``user:alice``
-    entry, so if the tag exists with alice's role-derived grants afterward, it
-    can only have come from the authn database.
 
     (That a ``user:<id>`` tag confers access to a user-owned node is covered by
     test_user_owned_node_access_control via the intrinsic policy self-grant,
@@ -1301,9 +1261,6 @@ def test_principal_tag_generated_from_authn_db(
     # load_principal_tags reads to generate 'user:alice').
     factory("alice", "alice")
 
-    # Compile with principal tags loaded from the authn database, WITHOUT any
-    # user:alice entry in the config -- so the tag can only be generated from
-    # the authn database, not the config.
     access_tags_compiler = compile_access_tags_tables_with_reset
     tag_config = access_tags_compiler.tag_config
     assert "user:alice" not in tag_config["tags"]
@@ -1319,8 +1276,8 @@ def test_principal_tag_generated_from_authn_db(
     assert _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", "write:data"
     )
-    # 'register' is not in alice's 'user' role, so a pure-authn compilation must
-    # NOT grant it (this would only appear if a config definition contributed).
+    # 'register' is not in alice's 'user' role, so a pure-authn compilation would
+    # not grant it (this would only appear if a config definition contributed).
     assert not _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", "register"
     )
@@ -1340,15 +1297,12 @@ def test_principal_tag_config_scopes_unioned_with_auth_scopes(
     ``load_principal_tags`` appends an authn-derived users entry alongside the
     config users entry (both keyed by the same identifier); ``compile`` unions
     per-user scopes. Here alice's authn role ('user') grants read/write/etc but
-    NOT 'register'; the config grants 'register' but not (say) 'write:data'.
-    The compiled user:alice grant must contain BOTH sets.
+    not 'register'; the config grants 'register' but not (say) 'write:data'.
+    The compiled user:alice grant will contain both sets.
     """
     factory = access_control_test_context_factory
     factory("alice", "alice")  # populate authn DB with alice's identity
 
-    # 'register' is a valid tag scope (used by facility_admin) but is NOT in
-    # alice's authn 'user' role, so it can only come from the config. Conversely
-    # 'write:data' comes only from her authn role (the config entry omits it).
     config_only_scope = "register"
     authn_only_scope = "write:data"
 
@@ -1363,9 +1317,8 @@ def test_principal_tag_config_scopes_unioned_with_auth_scopes(
     assert _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", config_only_scope
     )
-    # ...and an authn-role-only scope is also present (the config entry omitted
-    # it) -- confirming the two scope sets were unioned, not one overriding the
-    # other.
+    # ...and an authn-role-only scope is also present
+    # confirms the two scope sets were unioned, not one overridden
     assert _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", authn_only_scope
     )
@@ -1416,9 +1369,6 @@ def test_in_use_tag_retained_on_recompile(
         _compiler_run(access_tags_compiler, catalog_uri, "recompile")
 
     # The access_tags row is retained (not deleted, since it is still in use).
-    # Check this first: _node_has_access_tag joins through access_tags, so it can only
-    # be meaningfully True if the tag row still exists -- establishing the row
-    # survived makes the assignment check below unambiguous.
     assert _access_tag_exists(catalog_uri, "physicists_tag")
     # The node<->tag assignment is preserved: the compiler never deletes
     # node_access_tags rows for an in-use tag.

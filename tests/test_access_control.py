@@ -203,7 +203,7 @@ def _server_config(catalog_uri, authn_uri, tmp_path):
     -- at startup; the tags must already be defined (the compiler runs first).
     """
 
-    def _tree(path, tags):
+    def _tree(path, access_tags):
         mount = path.strip("/").upper()
         return {
             "tree": "catalog",
@@ -211,14 +211,17 @@ def _server_config(catalog_uri, authn_uri, tmp_path):
                 "uri": catalog_uri,
                 "writable_storage": str(tmp_path / mount.lower()),
                 "mount_node": f"/{mount}",
-                "top_level_access_tags": tags,
+                "top_level_access_tags": access_tags,
             },
             "path": path,
         }
 
     return {
         "create_mount_nodes_if_not_exist": True,
-        "trees": [_tree(f"/{name}", tags) for name, tags in TOP_LEVEL_TAGS.items()],
+        "trees": [
+            _tree(f"/{name}", access_tags)
+            for name, access_tags in TOP_LEVEL_TAGS.items()
+        ],
         "access_control": {
             "access_policy": (
                 "tiled.access_control.access_policies:TagBasedAccessPolicy"
@@ -525,27 +528,34 @@ def catalog_db_execute(catalog_uri, statements):
     return asyncio.run(_run())
 
 
-def _tag_exists(catalog_uri, tag_name):
+def _access_tag_exists(catalog_uri, access_tag_name):
     rows = catalog_db_execute(
         catalog_uri,
-        [("SELECT 1 FROM access_tags WHERE name = :n", {"n": tag_name})],
+        [("SELECT 1 FROM access_tags WHERE name = :n", {"n": access_tag_name})],
     )
     return bool(rows)
 
 
-def _tag_is_public(catalog_uri, tag_name):
+def _access_tag_is_public(catalog_uri, access_tag_name):
     rows = catalog_db_execute(
         catalog_uri,
-        [("SELECT 1 FROM access_tags WHERE name = :n AND is_public", {"n": tag_name})],
+        [
+            (
+                "SELECT 1 FROM access_tags WHERE name = :n AND is_public",
+                {"n": access_tag_name},
+            )
+        ],
     )
     return bool(rows)
 
 
-def _principal_has_scope_on_tag(catalog_uri, tag_name, principal, scope_name=None):
+def _principal_has_scope_on_access_tag(
+    catalog_uri, access_tag_name, principal, scope_name=None
+):
     """
     Whether ``principal`` has any scope (or a specific ``scope_name``) on
-    ``tag_name`` in the catalog database. Replaces the old sidecar
-    ``user_tag_scopes`` lookups (tag_name/user_name/scope_name), which are now
+    ``access_tag_name`` in the catalog database. Replaces the old sidecar
+    ``user_tag_scopes`` lookups (access_tag_name/user_name/scope_name), which are now
     the ``access_tag_principal_scopes`` junction joined to ``access_tags``,
     ``access_tags_principals`` and (for a scope name) ``scopes``.
     """
@@ -555,7 +565,7 @@ def _principal_has_scope_on_tag(catalog_uri, tag_name, principal, scope_name=Non
         "JOIN access_tags t ON t.id = aps.tag_id "
         "JOIN access_tags_principals p ON p.id = aps.principal_id "
     )
-    params = {"t": tag_name, "p": principal}
+    params = {"t": access_tag_name, "p": principal}
     if scope_name is not None:
         sql += "JOIN scopes s ON s.id = aps.scope_id "
         params["s"] = scope_name
@@ -566,10 +576,10 @@ def _principal_has_scope_on_tag(catalog_uri, tag_name, principal, scope_name=Non
     return bool(rows)
 
 
-def _set_node_tags(catalog_uri, node_key, tag_names):
+def _set_node_access_tags(catalog_uri, node_key, access_tag_names):
     """
     Surgically set the access tags on the catalog node with key ``node_key`` to
-    exactly ``tag_names`` (creating bare ``access_tags`` rows for any tag that
+    exactly ``access_tag_names`` (creating bare ``access_tags`` rows for any tag that
     does not yet exist). Replaces the old sidecar surgery that rewrote an
     ``access_blobs`` row's JSON ``tags``; the node<->tag mapping now lives in
     the ``node_access_tags`` junction.
@@ -577,7 +587,7 @@ def _set_node_tags(catalog_uri, node_key, tag_names):
     statements = []
     # Ensure each tag name exists in access_tags (name-only bare row is fine
     # for these tests, which check policy behavior, not tag semantics).
-    for name in tag_names:
+    for name in access_tag_names:
         statements.append(
             (
                 # CAST the reused parameter so asyncpg can deduce a single,
@@ -599,7 +609,7 @@ def _set_node_tags(catalog_uri, node_key, tag_names):
         )
     )
     # Associate the node with each of the requested tags.
-    for name in tag_names:
+    for name in access_tag_names:
         statements.append(
             (
                 "INSERT INTO node_access_tags (node_id, tag_id) "
@@ -611,7 +621,7 @@ def _set_node_tags(catalog_uri, node_key, tag_names):
     catalog_db_execute(catalog_uri, statements)
 
 
-def _delete_node_tags(catalog_uri, node_key):
+def _delete_node_access_tags(catalog_uri, node_key):
     """
     Surgically remove ALL access-tag rows for the node with key ``node_key``,
     leaving a node with zero ``node_access_tags`` entries. In the access-tags
@@ -630,9 +640,9 @@ def _delete_node_tags(catalog_uri, node_key):
     )
 
 
-def _principal_owns_tag(catalog_uri, tag_name, principal=None):
+def _principal_owns_access_tag(catalog_uri, access_tag_name, principal=None):
     """
-    Whether ``tag_name`` has any owner (or specifically ``principal`` as owner).
+    Whether ``access_tag_name`` has any owner (or specifically ``principal`` as owner).
     Replaces the old sidecar ``user_tag_owners`` lookups; owners now live in the
     ``access_tag_owners`` junction joined to ``access_tags`` and
     ``access_tags_principals``.
@@ -640,7 +650,7 @@ def _principal_owns_tag(catalog_uri, tag_name, principal=None):
     sql = (
         "SELECT 1 " "FROM access_tag_owners o " "JOIN access_tags t ON t.id = o.tag_id "
     )
-    params = {"t": tag_name}
+    params = {"t": access_tag_name}
     if principal is not None:
         sql += "JOIN access_tags_principals p ON p.id = o.principal_id "
     sql += "WHERE t.name = :t"
@@ -651,10 +661,10 @@ def _principal_owns_tag(catalog_uri, tag_name, principal=None):
     return bool(rows)
 
 
-def _node_has_tag(catalog_uri, node_key, tag_name):
+def _node_has_access_tag(catalog_uri, node_key, access_tag_name):
     """
     Whether the catalog node with key ``node_key`` is still assigned
-    ``tag_name`` in the ``node_access_tags`` junction (joined through
+    ``access_tag_name`` in the ``node_access_tags`` junction (joined through
     ``access_tags`` and ``nodes``). Used to confirm the compiler never deletes
     an in-use node<->tag assignment even when the tag is dropped from config.
     """
@@ -667,7 +677,7 @@ def _node_has_tag(catalog_uri, node_key, tag_name):
                 "JOIN access_tags t ON t.id = nat.tag_id "
                 "JOIN nodes n ON n.id = nat.node_id "
                 "WHERE n.key = :k AND t.name = :t",
-                {"k": node_key, "t": tag_name},
+                {"k": node_key, "t": access_tag_name},
             )
         ],
     )
@@ -731,39 +741,39 @@ def test_access_tag_compiler(compile_access_tags_tables_with_reset, catalog_uri)
     _compiler_run(access_tags_compiler, catalog_uri, "recompile")
 
     # check that new tag was added and compiled with user+scopes
-    assert _tag_exists(catalog_uri, "new_tag")
-    assert _principal_has_scope_on_tag(catalog_uri, "new_tag", "tony")
+    assert _access_tag_exists(catalog_uri, "new_tag")
+    assert _principal_has_scope_on_access_tag(catalog_uri, "new_tag", "tony")
 
     # check that new role was added - note roles do not get saved in the db
     assert "new_role" in access_tags_compiler.roles
 
     # check that newly added user and group were given scopes on tag
-    assert _principal_has_scope_on_tag(catalog_uri, "biologists_tag", "tony")
-    assert _principal_has_scope_on_tag(catalog_uri, "physicists_tag", "chris")
+    assert _principal_has_scope_on_access_tag(catalog_uri, "biologists_tag", "tony")
+    assert _principal_has_scope_on_access_tag(catalog_uri, "physicists_tag", "chris")
 
     # check that auto_tag added ACL to parent tag
-    assert _principal_has_scope_on_tag(catalog_uri, "chemists_tag", "tony")
+    assert _principal_has_scope_on_access_tag(catalog_uri, "chemists_tag", "tony")
 
     # check tag was added to tag_owners section
-    assert _principal_owns_tag(catalog_uri, "new_tag")
+    assert _principal_owns_access_tag(catalog_uri, "new_tag")
 
     # check adding new user and group to owners of tags
-    assert _principal_owns_tag(catalog_uri, "biologists_tag", "tony")
-    assert _principal_owns_tag(catalog_uri, "chemists_tag", "chris")
+    assert _principal_owns_access_tag(catalog_uri, "biologists_tag", "tony")
+    assert _principal_owns_access_tag(catalog_uri, "chemists_tag", "chris")
 
     # check that the role/scopes changes for a user and group on a tag were effective
-    assert not _principal_has_scope_on_tag(
+    assert not _principal_has_scope_on_access_tag(
         catalog_uri, "alice_tag", "alice", "write:metadata"
     )
-    assert _principal_has_scope_on_tag(
+    assert _principal_has_scope_on_access_tag(
         catalog_uri, "biologists_tag", "chris", "write:metadata"
     )
 
     # check tha tag was marked as public after inheriting public tag
-    assert _tag_is_public(catalog_uri, "alice_tag")
+    assert _access_tag_is_public(catalog_uri, "alice_tag")
 
     # check that user added to group was compiled into tag ACL
-    assert _principal_has_scope_on_tag(catalog_uri, "chemists_tag", "kate")
+    assert _principal_has_scope_on_access_tag(catalog_uri, "chemists_tag", "kate")
 
     # attempt redefining the public tag (and fail)
     compiler_tag_config["tags"].update(
@@ -781,39 +791,41 @@ def test_access_tag_compiler(compile_access_tags_tables_with_reset, catalog_uri)
     _compiler_run(access_tags_compiler, catalog_uri, "recompile")
 
     # check that new tag was removed and no longer compiled
-    assert not _tag_exists(catalog_uri, "new_tag")
-    assert not _principal_has_scope_on_tag(catalog_uri, "new_tag", "tony")
+    assert not _access_tag_exists(catalog_uri, "new_tag")
+    assert not _principal_has_scope_on_access_tag(catalog_uri, "new_tag", "tony")
 
     # check that new role was removed - note roles do not get saved in the db
     assert "new_role" not in access_tags_compiler.roles
 
     # check that removed user and group were not given scopes on tag
-    assert not _principal_has_scope_on_tag(catalog_uri, "biologists_tag", "tony")
-    assert not _principal_has_scope_on_tag(catalog_uri, "physicists_tag", "chris")
+    assert not _principal_has_scope_on_access_tag(catalog_uri, "biologists_tag", "tony")
+    assert not _principal_has_scope_on_access_tag(
+        catalog_uri, "physicists_tag", "chris"
+    )
 
     # check that auto_tag ACL removed from parent tag
-    assert not _principal_has_scope_on_tag(catalog_uri, "chemists_tag", "tony")
+    assert not _principal_has_scope_on_access_tag(catalog_uri, "chemists_tag", "tony")
 
     # check tag was removed from tag_owners section
-    assert not _principal_owns_tag(catalog_uri, "new_tag")
+    assert not _principal_owns_access_tag(catalog_uri, "new_tag")
 
     # check removing user and group from owners of tags
-    assert not _principal_owns_tag(catalog_uri, "biologists_tag", "tony")
-    assert not _principal_owns_tag(catalog_uri, "chemists_tag", "chris")
+    assert not _principal_owns_access_tag(catalog_uri, "biologists_tag", "tony")
+    assert not _principal_owns_access_tag(catalog_uri, "chemists_tag", "chris")
 
     # check that the role/scopes changes for a user and group on a tag were undone
-    assert _principal_has_scope_on_tag(
+    assert _principal_has_scope_on_access_tag(
         catalog_uri, "alice_tag", "alice", "write:metadata"
     )
-    assert not _principal_has_scope_on_tag(
+    assert not _principal_has_scope_on_access_tag(
         catalog_uri, "biologists_tag", "chris", "write:metadata"
     )
 
     # check tha tag was unmarked as public after removing the public auto_tag
-    assert not _tag_is_public(catalog_uri, "alice_tag")
+    assert not _access_tag_is_public(catalog_uri, "alice_tag")
 
     # check that user removed from group was compiled out of tag ACL
-    assert not _principal_has_scope_on_tag(catalog_uri, "chemists_tag", "kate")
+    assert not _principal_has_scope_on_access_tag(catalog_uri, "chemists_tag", "kate")
 
 
 def test_basic_access_control(access_control_test_context_factory):
@@ -1136,7 +1148,7 @@ def test_update_node_access_control(access_control_test_context_factory, catalog
         admin_client[top][data].replace_metadata(access_tags=["biologists_tag"])
 
         # surgically add an undefined tag to the node, then fail when trying to remove it
-        _set_node_tags(catalog_uri, data, ["undefined_tag", "biologists_tag"])
+        _set_node_access_tags(catalog_uri, data, ["undefined_tag", "biologists_tag"])
         with fail_with_status_code(HTTP_403_FORBIDDEN):
             alice_client[top][data].replace_metadata(access_tags=["biologists_tag"])
 
@@ -1181,7 +1193,7 @@ def test_empty_tags_node_access_control(
     top = "qux"
     for data in ["data_M"]:
         admin_client[top].write_array(arr, key=data, access_tags=["alice_tag"])
-        _delete_node_tags(catalog_uri, data)
+        _delete_node_access_tags(catalog_uri, data)
 
         assert data in admin_client[top]
         admin_client[top][data]
@@ -1300,12 +1312,16 @@ def test_principal_tag_generated_from_authn_db(
     # user:alice exists and carries scopes from alice's authn role ('user',
     # which grants read/write) -- it could only have come from the authn DB,
     # since the config never defined it.
-    assert _tag_exists(catalog_uri, "user:alice")
-    assert _principal_has_scope_on_tag(catalog_uri, "user:alice", "alice", "read:data")
-    assert _principal_has_scope_on_tag(catalog_uri, "user:alice", "alice", "write:data")
+    assert _access_tag_exists(catalog_uri, "user:alice")
+    assert _principal_has_scope_on_access_tag(
+        catalog_uri, "user:alice", "alice", "read:data"
+    )
+    assert _principal_has_scope_on_access_tag(
+        catalog_uri, "user:alice", "alice", "write:data"
+    )
     # 'register' is not in alice's 'user' role, so a pure-authn compilation must
     # NOT grant it (this would only appear if a config definition contributed).
-    assert not _principal_has_scope_on_tag(
+    assert not _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", "register"
     )
 
@@ -1344,13 +1360,13 @@ def test_principal_tag_config_scopes_unioned_with_auth_scopes(
     _compile_with_principal_tags(tag_config, catalog_uri, factory.authn_uri)
 
     # The config-only scope is present (it is not in alice's authn role)...
-    assert _principal_has_scope_on_tag(
+    assert _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", config_only_scope
     )
     # ...and an authn-role-only scope is also present (the config entry omitted
     # it) -- confirming the two scope sets were unioned, not one overriding the
     # other.
-    assert _principal_has_scope_on_tag(
+    assert _principal_has_scope_on_access_tag(
         catalog_uri, "user:alice", "alice", authn_only_scope
     )
 
@@ -1381,9 +1397,9 @@ def test_in_use_tag_retained_on_recompile(
 
     # Baseline: the tag is defined, public-status false, has grants, and the
     # node is assigned the tag.
-    assert _tag_exists(catalog_uri, "physicists_tag")
-    assert _principal_has_scope_on_tag(catalog_uri, "physicists_tag", "alice")
-    assert _node_has_tag(catalog_uri, node_key, "physicists_tag")
+    assert _access_tag_exists(catalog_uri, "physicists_tag")
+    assert _principal_has_scope_on_access_tag(catalog_uri, "physicists_tag", "alice")
+    assert _node_has_access_tag(catalog_uri, node_key, "physicists_tag")
 
     # Drop physicists_tag entirely from the config and recompile. clear_raw_tags
     # is required because load_tag_config merges (updates) into the compiler's
@@ -1400,18 +1416,20 @@ def test_in_use_tag_retained_on_recompile(
         _compiler_run(access_tags_compiler, catalog_uri, "recompile")
 
     # The access_tags row is retained (not deleted, since it is still in use).
-    # Check this first: _node_has_tag joins through access_tags, so it can only
+    # Check this first: _node_has_access_tag joins through access_tags, so it can only
     # be meaningfully True if the tag row still exists -- establishing the row
     # survived makes the assignment check below unambiguous.
-    assert _tag_exists(catalog_uri, "physicists_tag")
+    assert _access_tag_exists(catalog_uri, "physicists_tag")
     # The node<->tag assignment is preserved: the compiler never deletes
     # node_access_tags rows for an in-use tag.
-    assert _node_has_tag(catalog_uri, node_key, "physicists_tag")
+    assert _node_has_access_tag(catalog_uri, node_key, "physicists_tag")
     # The retained tag row is forced non-public and stripped of all grants
     # (confers no access).
-    assert not _tag_is_public(catalog_uri, "physicists_tag")
-    assert not _principal_has_scope_on_tag(catalog_uri, "physicists_tag", "alice")
-    assert not _principal_owns_tag(catalog_uri, "physicists_tag")
+    assert not _access_tag_is_public(catalog_uri, "physicists_tag")
+    assert not _principal_has_scope_on_access_tag(
+        catalog_uri, "physicists_tag", "alice"
+    )
+    assert not _principal_owns_access_tag(catalog_uri, "physicists_tag")
 
     # The node itself is still readable by an admin (admins bypass tag checks).
     assert node_key in admin_client[top]

@@ -51,7 +51,7 @@ mutation($input: CreateLinkInput!) {
 # the fixtures provision every tag definition these tests use up front -- the
 # access tags compiler's job in a real deployment. The principal tags follow
 # the access policy's ``user:<username>`` convention.
-TAG_DEFINITIONS = (
+ACCESS_TAG_DEFINITIONS = (
     "team",
     "alice_tag",
     "node_team",
@@ -64,8 +64,8 @@ TAG_DEFINITIONS = (
 class FakeTagPolicy:
     """Policy stub mirroring the node access tags lifecycle and scope checks."""
 
-    def __init__(self, user_tags):
-        self.user_tags = user_tags
+    def __init__(self, user_access_tags):
+        self.user_access_tags = user_access_tags
 
     async def init_node(
         self,
@@ -99,10 +99,10 @@ class FakeTagPolicy:
         authn_access_tags,
         authn_scopes,
     ):
-        tags = set(node.access_tags or ())
-        if f"user:{principal}" in tags:
+        node_access_tags = set(node.access_tags or ())
+        if f"user:{principal}" in node_access_tags:
             return set(authn_scopes)
-        if tags.intersection(self.user_tags.get(principal, set())):
+        if node_access_tags.intersection(self.user_access_tags.get(principal, set())):
             return set(authn_scopes)
         return set()
 
@@ -118,8 +118,8 @@ class FakeTagPolicy:
 
 
 class FilterPolicy(FakeTagPolicy):
-    def __init__(self, user_tags):
-        super().__init__(user_tags)
+    def __init__(self, user_access_tags):
+        super().__init__(user_access_tags)
         self.filter_calls = 0
 
     async def filters(
@@ -146,7 +146,7 @@ async def store():
     s = await GraphSQLAlchemyStore.from_database_settings(database_settings)
     async with s._engine.begin() as conn:
         await conn.execute(
-            sa_insert(_access_tags), [{"name": name} for name in TAG_DEFINITIONS]
+            sa_insert(_access_tags), [{"name": name} for name in ACCESS_TAG_DEFINITIONS]
         )
     yield s
     # Tear down the shared pool entry (rather than just `s.close()`, which is
@@ -194,16 +194,18 @@ async def _execute(query, context, variables=None):
     return result
 
 
-async def _tag_ids(conn, tag_names):
+async def _access_tag_ids(conn, access_tag_names):
     rows = (
         await conn.execute(
-            sa_select(_access_tags.c.id).where(_access_tags.c.name.in_(tag_names))
+            sa_select(_access_tags.c.id).where(
+                _access_tags.c.name.in_(access_tag_names)
+            )
         )
     ).scalars()
     return list(rows)
 
 
-async def _insert_node(store, node_id, access_tags, key="node", parent=None):
+async def _insert_node(store, node_id, access_tags, key="node", parent=0):
     """Insert a synthetic catalog node row for entity/node delegation tests.
 
     Nodes are placed under the catalog root (parent=0) so that they are
@@ -222,11 +224,16 @@ async def _insert_node(store, node_id, access_tags, key="node", parent=None):
             )
         )
         access_tag_ids = await _access_tag_ids(conn, access_tags)
-        assert len(access_tag_ids) == len(set(access_tags)), f"undefined tags among {access_tags}"
+        assert len(access_tag_ids) == len(
+            set(access_tags)
+        ), f"undefined tags among {access_tags}"
         if access_tag_ids:
             await conn.execute(
                 sa_insert(_node_access_tags),
-                [{"node_id": node_id, "access_tag_id": access_tag_id} for access_tag_id in access_tag_ids],
+                [
+                    {"node_id": node_id, "tag_id": access_tag_id}
+                    for access_tag_id in access_tag_ids
+                ],
             )
 
 
@@ -234,12 +241,12 @@ async def _insert_node(store, node_id, access_tags, key="node", parent=None):
 async def test_deleting_node_removes_tag_associations_but_not_tag(store):
     await _insert_node(store, 1, ["team"])
     async with store._engine.begin() as conn:
-        tag_id = await conn.scalar(
+        access_tag_id = await conn.scalar(
             sa_select(_node_access_tags.c.tag_id).where(
                 _node_access_tags.c.node_id == 1
             )
         )
-        assert tag_id is not None
+        assert access_tag_id is not None
         await conn.execute(sa_delete(_nodes).where(_nodes.c.id == 1))
         remaining_assoc = await conn.scalar(
             sa_select(_node_access_tags.c.tag_id).where(
@@ -248,11 +255,11 @@ async def test_deleting_node_removes_tag_associations_but_not_tag(store):
         )
         # The association cascades away with the node, but the deduplicated
         # tag definition is shared and must survive.
-        surviving_tag = await conn.scalar(
-            sa_select(_access_tags.c.id).where(_access_tags.c.id == tag_id)
+        surviving_access_tag = await conn.scalar(
+            sa_select(_access_tags.c.id).where(_access_tags.c.id == access_tag_id)
         )
     assert remaining_assoc is None
-    assert surviving_tag == tag_id
+    assert surviving_access_tag == access_tag_id
 
 
 @pytest.mark.asyncio
@@ -277,26 +284,26 @@ async def test_tag_is_shared_across_node_entity_and_link(store):
     assert entity.access_tags == frozenset({"team"})
     assert link.access_tags == frozenset({"team"})
     async with store._engine.connect() as conn:
-        (tag_id,) = await _tag_ids(conn, ["team"])
-        node_tag = await conn.scalar(
+        (access_tag_id,) = await _access_tag_ids(conn, ["team"])
+        node_access_tag = await conn.scalar(
             sa_select(_node_access_tags.c.tag_id).where(
                 _node_access_tags.c.node_id == 1,
-                _node_access_tags.c.tag_id == tag_id,
+                _node_access_tags.c.tag_id == access_tag_id,
             )
         )
-        entity_tag = await conn.scalar(
+        entity_access_tag = await conn.scalar(
             sa_select(_entity_access_tags.c.tag_id).where(
                 _entity_access_tags.c.entity_id == entity.id,
-                _entity_access_tags.c.tag_id == tag_id,
+                _entity_access_tags.c.tag_id == access_tag_id,
             )
         )
-        link_tag = await conn.scalar(
+        link_access_tag = await conn.scalar(
             sa_select(_link_access_tags.c.tag_id).where(
                 _link_access_tags.c.link_id == link.id,
-                _link_access_tags.c.tag_id == tag_id,
+                _link_access_tags.c.tag_id == access_tag_id,
             )
         )
-    assert node_tag == entity_tag == link_tag == tag_id
+    assert node_access_tag == entity_access_tag == link_access_tag == access_tag_id
 
 
 @pytest.mark.asyncio
@@ -305,23 +312,23 @@ async def test_deleting_entity_removes_tag_associations_but_not_tag(store):
         entity_type="sample", name="entity", access_tags=["team"]
     )
     async with store._engine.begin() as conn:
-        tag_id = await conn.scalar(
+        access_tag_id = await conn.scalar(
             sa_select(_entity_access_tags.c.tag_id).where(
                 _entity_access_tags.c.entity_id == entity.id
             )
         )
-        assert tag_id is not None
+        assert access_tag_id is not None
         await conn.execute(sa_delete(_entities).where(_entities.c.id == entity.id))
         remaining_assoc = await conn.scalar(
             sa_select(_entity_access_tags.c.tag_id).where(
                 _entity_access_tags.c.entity_id == entity.id
             )
         )
-        surviving_tag = await conn.scalar(
-            sa_select(_access_tags.c.id).where(_access_tags.c.id == tag_id)
+        surviving_access_tag = await conn.scalar(
+            sa_select(_access_tags.c.id).where(_access_tags.c.id == access_tag_id)
         )
     assert remaining_assoc is None
-    assert surviving_tag == tag_id
+    assert surviving_access_tag == access_tag_id
 
 
 @pytest.mark.asyncio
@@ -332,23 +339,23 @@ async def test_deleting_link_removes_tag_associations_but_not_tag(store):
         subject.id, "relates_to", object_.id, access_tags=["team"]
     )
     async with store._engine.begin() as conn:
-        tag_id = await conn.scalar(
+        access_tag_id = await conn.scalar(
             sa_select(_link_access_tags.c.tag_id).where(
                 _link_access_tags.c.link_id == link.id
             )
         )
-        assert tag_id is not None
+        assert access_tag_id is not None
         await conn.execute(sa_delete(_links).where(_links.c.id == link.id))
         remaining_assoc = await conn.scalar(
             sa_select(_link_access_tags.c.tag_id).where(
                 _link_access_tags.c.link_id == link.id
             )
         )
-        surviving_tag = await conn.scalar(
-            sa_select(_access_tags.c.id).where(_access_tags.c.id == tag_id)
+        surviving_access_tag = await conn.scalar(
+            sa_select(_access_tags.c.id).where(_access_tags.c.id == access_tag_id)
         )
     assert remaining_assoc is None
-    assert surviving_tag == tag_id
+    assert surviving_access_tag == access_tag_id
 
 
 @pytest.mark.asyncio
@@ -504,7 +511,7 @@ async def test_link_crud_and_access_control(store, policy):
     # No tags supplied at creation: the policy tagged the link with its
     # creator's principal tag.
     async with store._engine.connect() as conn:
-        link_tag_names = (
+        link_access_tag_names = (
             await conn.execute(
                 sa_select(_access_tags.c.name)
                 .select_from(_link_access_tags)
@@ -512,7 +519,7 @@ async def test_link_crud_and_access_control(store, policy):
                 .where(_link_access_tags.c.link_id == link_id)
             )
         ).scalars()
-        assert set(link_tag_names) == {"user:alice"}
+        assert set(link_access_tag_names) == {"user:alice"}
 
     bob_read_ctx = _context(store, policy, "bob", {"read:metadata"})
     read_link = await _execute(
@@ -697,12 +704,12 @@ async def test_entity_node_access_tags_trigger_rejects_direct_insert(store):
         entity_type="sample", name="linked", node_id=1, access_tags=None
     )
     async with store._engine.connect() as conn:
-        (tag_id,) = await _tag_ids(conn, ["team"])
+        (access_tag_id,) = await _access_tag_ids(conn, ["team"])
     with pytest.raises(IntegrityError):
         async with store._engine.begin() as conn:
             await conn.execute(
                 sa_insert(_entity_access_tags).values(
-                    entity_id=entity.id, tag_id=tag_id
+                    entity_id=entity.id, tag_id=access_tag_id
                 )
             )
 
@@ -993,7 +1000,7 @@ def test_graphql_http_route_access_control_integration(policy):
         async with catalog.context.engine.begin() as conn:
             await conn.execute(
                 sa_insert(_access_tags),
-                [{"name": name} for name in TAG_DEFINITIONS],
+                [{"name": name} for name in ACCESS_TAG_DEFINITIONS],
             )
 
     catalog.startup_tasks.append(define_tags)

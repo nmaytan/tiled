@@ -211,31 +211,31 @@ class RootNode:
         self.access_tags = AccessTags(top_level_access_tags or [])
 
 
-async def _resolve_access_tags(db, tag_names):
+async def _resolve_access_tags(db, access_tag_names):
     """
-    Resolve tag names to orm.AccessTag rows in the given session.
+    Resolve access tag names to orm.AccessTag rows in the given session.
 
     Fetches only the requested names (an indexed IN lookup, not a scan of
-    the tags table). A node cannot be associated with a tag that has no
-    row, so unknown names raise. Normally the access policy has already
+    the access_tags table). A node cannot be associated with a tag that has
+    no row, so unknown names raise. Normally the access policy has already
     validated the tags; this fires only for requests that bypassed the
     policy or raced a tag-definition resync, and it uses the same status
     code that the policy check produces (403).
 
     Principal tags are slightly different: these need to exist at write,
-    possibly before the tags compiler has been able to create them.
+    possibly before the access tags compiler has been able to create them.
     """
-    await register_principal_tag_rows(await db.connection(), tag_names)
+    await register_principal_tag_rows(await db.connection(), access_tag_names)
     tag_rows = (
         (
             await db.execute(
-                select(orm.AccessTag).where(orm.AccessTag.name.in_(tag_names))
+                select(orm.AccessTag).where(orm.AccessTag.name.in_(access_tag_names))
             )
         )
         .scalars()
         .all()
     )
-    missing = set(tag_names) - {tag.name for tag in tag_rows}
+    missing = set(access_tag_names) - {tag.name for tag in tag_rows}
     if missing:
         raise HTTPException(
             status_code=HTTP_403_FORBIDDEN,

@@ -81,11 +81,11 @@ async def initialize_database(engine: AsyncEngine):
         await connection.commit()
 
 
-async def register_principal_tag_rows(connection, tag_names):
+async def register_principal_tag_rows(connection, access_tag_names):
     """
-    Auto-register bare access tag rows for any principal tags in tag_names.
-    Principal tags need to exist at write, possibly before the tags compiler
-    has been able to create them.
+    Auto-register bare access tag rows for any principal tags in
+    access_tag_names. Principal tags need to exist at write, possibly before
+    the access tags compiler has been able to create them.
 
     Call this on the same connection/transaction as the tag assignment, so
     that the row is never observed unassigned and the compiler's retention
@@ -96,7 +96,7 @@ async def register_principal_tag_rows(connection, tag_names):
     from . import orm
 
     principal_tags = {
-        name for name in tag_names if name.startswith(PRINCIPAL_TAG_PREFIXES)
+        name for name in access_tag_names if name.startswith(PRINCIPAL_TAG_PREFIXES)
     }
     if not principal_tags:
         return

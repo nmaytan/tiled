@@ -579,13 +579,13 @@ class ExternalPolicyDecisionPoint(AccessPolicy, ABC):
         authn_scopes: Scopes,
         scopes: Scopes,
     ) -> Filters:
-        tags = await self._get_external_decision(
+        access_tags_decision = await self._get_external_decision(
             self._user_tags,
             self.build_input(principal, authn_access_tags, authn_scopes),
             ResultHolder[list[str]],
         )
-        if tags is not None:
-            return [AccessTagsFilter(AccessTags(tags.result))]
+        if access_tags_decision is not None:
+            return [AccessTagsFilter(AccessTags(access_tags_decision.result))]
         else:
             return NO_ACCESS
 

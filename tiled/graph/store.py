@@ -80,7 +80,9 @@ class LinkRecord(BaseModel):
     created_at: datetime
 
 
-def _access_tags_match_condition(assoc_table, assoc_id_column, owner_column, tags):
+def _access_tags_match_condition(
+    assoc_table, assoc_id_column, owner_column, access_tag_names
+):
     """
     Rows tagged with at least one of the given access tags.
     EXISTS is used (vs IN) as it is much more preformant in SQLite,
@@ -91,7 +93,7 @@ def _access_tags_match_condition(assoc_table, assoc_id_column, owner_column, tag
         .select_from(assoc_table)
         .join(_access_tags, _access_tags.c.id == assoc_table.c.tag_id)
         .where(assoc_id_column == owner_column)
-        .where(_access_tags.c.name.in_(tags))
+        .where(_access_tags.c.name.in_(access_tag_names))
         .exists()
     )
 
@@ -141,17 +143,17 @@ def _access_filters_condition(condition_builder, queries: list[AccessTagsFilter]
     return condition
 
 
-async def _resolve_tag_ids(conn, tag_names: Iterable[str]) -> list[int]:
+async def _resolve_access_tag_ids(conn, access_tag_names: Iterable[str]) -> list[int]:
     """
-    Resolve tag names to access_tags ids. An association cannot reference a
-    tag that has no row, so unknown names raise. Normally the access policy
-    has already validated the tags; this fires only for requests that
-    bypassed the policy or raced a tag-definition resync.
+    Resolve access tag names to access_tags ids. An association cannot
+    reference a tag that has no row, so unknown names raise. Normally the
+    access policy has already validated the tags; this fires only for requests
+    that bypassed the policy or raced a tag-definition resync.
 
     Principal tags are slightly different: these need to exist at write,
     possibly before the tags compiler has been able to create them.
     """
-    names = set(tag_names)
+    names = set(access_tag_names)
     if not names:
         return []
     await register_principal_tag_rows(conn, names)
@@ -193,7 +195,7 @@ class GraphSQLAlchemyStore:
         return cls(engine, owns_engine=False)
 
     @staticmethod
-    def _to_entity(row, tags: Optional[frozenset[str]]) -> EntityRecord:
+    def _to_entity(row, access_tags: Optional[frozenset[str]]) -> EntityRecord:
         return EntityRecord(
             id=row.id,
             node_id=row.node_id,
@@ -202,25 +204,27 @@ class GraphSQLAlchemyStore:
             uri=row.uri,
             properties=row.properties or {},
             # None means access control is delegated to node_id.
-            access_tags=None if row.node_id is not None else (tags or frozenset()),
+            access_tags=(
+                None if row.node_id is not None else (access_tags or frozenset())
+            ),
             created_at=row.created_at,
         )
 
     @staticmethod
-    def _to_link(row, tags: Optional[frozenset[str]]) -> LinkRecord:
+    def _to_link(row, access_tags: Optional[frozenset[str]]) -> LinkRecord:
         return LinkRecord(
             id=row.id,
             subject_id=row.subject_id,
             predicate=row.predicate,
             object_id=row.object_id,
             properties=row.properties or {},
-            access_tags=tags or frozenset(),
+            access_tags=access_tags or frozenset(),
             created_at=row.created_at,
         )
 
     @staticmethod
-    async def _tags_by_id(conn, assoc_table, assoc_id_column, ids: list):
-        """Map entity/link id -> frozenset of tag names, one query per page."""
+    async def _access_tags_by_id(conn, assoc_table, assoc_id_column, ids: list):
+        """Map entity/link id -> frozenset of access tag names, one query per page."""
         if not ids:
             return {}
         rows = (
@@ -231,18 +235,18 @@ class GraphSQLAlchemyStore:
                 .where(assoc_id_column.in_(ids))
             )
         ).all()
-        tags_by_id: dict = {}
+        access_tags_by_id: dict = {}
         for assoc_id, name in rows:
-            tags_by_id.setdefault(assoc_id, set()).add(name)
-        return {key: frozenset(value) for key, value in tags_by_id.items()}
+            access_tags_by_id.setdefault(assoc_id, set()).add(name)
+        return {key: frozenset(value) for key, value in access_tags_by_id.items()}
 
-    async def _entity_tags(self, conn, ids: list[str]):
-        return await self._tags_by_id(
+    async def _entity_access_tags_by_id(self, conn, ids: list[str]):
+        return await self._access_tags_by_id(
             conn, _entity_access_tags, _entity_access_tags.c.entity_id, ids
         )
 
-    async def _link_tags(self, conn, ids: list[str]):
-        return await self._tags_by_id(
+    async def _link_access_tags_by_id(self, conn, ids: list[str]):
+        return await self._access_tags_by_id(
             conn, _link_access_tags, _link_access_tags.c.link_id, ids
         )
 
@@ -252,8 +256,8 @@ class GraphSQLAlchemyStore:
         ).one_or_none()
         if row is None:
             return None
-        tags = (await self._entity_tags(conn, [id])).get(id)
-        return self._to_entity(row, tags)
+        access_tags = (await self._entity_access_tags_by_id(conn, [id])).get(id)
+        return self._to_entity(row, access_tags)
 
     async def _link_record(self, conn, id: str) -> Optional[LinkRecord]:
         row = (
@@ -261,23 +265,26 @@ class GraphSQLAlchemyStore:
         ).one_or_none()
         if row is None:
             return None
-        tags = (await self._link_tags(conn, [id])).get(id)
-        return self._to_link(row, tags)
+        access_tags = (await self._link_access_tags_by_id(conn, [id])).get(id)
+        return self._to_link(row, access_tags)
 
-    async def _set_tags(
-        self, conn, assoc_table, assoc_id_column_name: str, id: str, tag_names
+    async def _set_access_tags(
+        self, conn, assoc_table, assoc_id_column_name: str, id: str, access_tag_names
     ) -> None:
-        """Replace the tag associations of an entity or link."""
-        tag_ids = await _resolve_tag_ids(conn, tag_names)
+        """Replace the access tag associations of an entity or link."""
+        access_tag_ids = await _resolve_access_tag_ids(conn, access_tag_names)
         await conn.execute(
             delete(assoc_table).where(
                 getattr(assoc_table.c, assoc_id_column_name) == id
             )
         )
-        if tag_ids:
+        if access_tag_ids:
             await conn.execute(
                 insert(assoc_table),
-                [{assoc_id_column_name: id, "tag_id": tag_id} for tag_id in tag_ids],
+                [
+                    {assoc_id_column_name: id, "tag_id": access_tag_id}
+                    for access_tag_id in access_tag_ids
+                ],
             )
 
     async def create_entity(
@@ -306,10 +313,13 @@ class GraphSQLAlchemyStore:
                 )
             )
             if node_id is None and access_tags:
-                tag_ids = await _resolve_tag_ids(conn, access_tags)
+                access_tag_ids = await _resolve_access_tag_ids(conn, access_tags)
                 await conn.execute(
                     insert(_entity_access_tags),
-                    [{"entity_id": id_, "tag_id": tag_id} for tag_id in tag_ids],
+                    [
+                        {"entity_id": id_, "tag_id": access_tag_id}
+                        for access_tag_id in access_tag_ids
+                    ],
                 )
             record = await self._entity_record(conn, id_)
         return record
@@ -364,8 +374,10 @@ class GraphSQLAlchemyStore:
         stmt = stmt.limit(limit).offset(offset)
         async with self._engine.connect() as conn:
             rows = (await conn.execute(stmt)).all()
-            tags_by_id = await self._entity_tags(conn, [row.id for row in rows])
-        return [self._to_entity(row, tags_by_id.get(row.id)) for row in rows]
+            access_tags_by_id = await self._entity_access_tags_by_id(
+                conn, [row.id for row in rows]
+            )
+        return [self._to_entity(row, access_tags_by_id.get(row.id)) for row in rows]
 
     async def delete_entity(self, id: str) -> bool:
         async with self._engine.begin() as conn:
@@ -429,7 +441,7 @@ class GraphSQLAlchemyStore:
                         )
                     )
                 elif effective_node_id is None:
-                    await self._set_tags(
+                    await self._set_access_tags(
                         conn, _entity_access_tags, "entity_id", id, access_tags
                     )
             record = await self._entity_record(conn, id)
@@ -463,10 +475,13 @@ class GraphSQLAlchemyStore:
                     )
                 )
                 if access_tags:
-                    tag_ids = await _resolve_tag_ids(conn, access_tags)
+                    access_tag_ids = await _resolve_access_tag_ids(conn, access_tags)
                     await conn.execute(
                         insert(_link_access_tags),
-                        [{"link_id": id_, "tag_id": tag_id} for tag_id in tag_ids],
+                        [
+                            {"link_id": id_, "tag_id": access_tag_id}
+                            for access_tag_id in access_tag_ids
+                        ],
                     )
                 record = await self._link_record(conn, id_)
         except IntegrityError as exc:
@@ -507,8 +522,10 @@ class GraphSQLAlchemyStore:
         stmt = stmt.limit(limit).offset(offset)
         async with self._engine.connect() as conn:
             rows = (await conn.execute(stmt)).all()
-            tags_by_id = await self._link_tags(conn, [row.id for row in rows])
-        return [self._to_link(row, tags_by_id.get(row.id)) for row in rows]
+            access_tags_by_id = await self._link_access_tags_by_id(
+                conn, [row.id for row in rows]
+            )
+        return [self._to_link(row, access_tags_by_id.get(row.id)) for row in rows]
 
     async def delete_link(self, id: str) -> bool:
         async with self._engine.begin() as conn:
@@ -530,7 +547,7 @@ class GraphSQLAlchemyStore:
                     update(_links).where(_links.c.id == id).values(**values)
                 )
             if access_tags is not UNSET:
-                await self._set_tags(
+                await self._set_access_tags(
                     conn, _link_access_tags, "link_id", id, access_tags or []
                 )
             record = await self._link_record(conn, id)

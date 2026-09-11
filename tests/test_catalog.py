@@ -64,7 +64,7 @@ async def client(catalog_adapter):
 
 @pytest.mark.asyncio
 async def test_root_node_has_default_access_tags(a):
-    tags = (
+    access_tags = (
         (
             await a.context.execute(
                 "SELECT access_tags.name "
@@ -77,7 +77,7 @@ async def test_root_node_has_default_access_tags(a):
         .scalars()
         .all()
     )
-    assert list(tags) == ["public"]
+    assert list(access_tags) == ["public"]
 
 
 @pytest.mark.asyncio
